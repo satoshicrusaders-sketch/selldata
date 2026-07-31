@@ -263,6 +263,12 @@ let
     // 期によって「売上日」列自体が存在しない期間があるため(11-12期あたりはOP日しかない)、
     // 3つの日付候補から存在するものを優先順(売上日 > 伝票日付 > OP日)で1本化した
     // 分析用の日付列を追加する。時系列の軸にはこちらを使うことを推奨。
+    //
+    // OP日(製品を使用した日=手術日)と売上日(納品書発行日)は意味が異なる別の日付のため、
+    // OP日を売上日の代わりに使うと会計上の月がズレる(実際に12期の集計値との突き合わせで
+    // 誤差の原因になっていた)。そのためOP日はここでは候補にしない。
+    // なお非表示列であっても Excel.Workbook は関係なく読み込むため、売上日列が
+    // 実際には存在するのに前段のサンプル確認で見えていなかった月がある可能性がある。
     WithUnifiedDate = Table.AddColumn(
         TypedDates,
         "取引日",
@@ -270,8 +276,7 @@ let
             let
                 candidates = {
                     Record.FieldOrDefault(_, "売上日", null),
-                    Record.FieldOrDefault(_, "伝票日付", null),
-                    Record.FieldOrDefault(_, "OP日", null)
+                    Record.FieldOrDefault(_, "伝票日付", null)
                 },
                 nonNulls = List.RemoveNulls(candidates)
             in
