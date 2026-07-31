@@ -147,17 +147,33 @@ let
             // 名前付きテーブル(ListObject)は、その裏にある通常シートの一部の範囲でもあるため、
             // 両方処理すると同じ行が二重に読み込まれる。名前付きテーブルがあればそれを優先し、
             // 見つかった場合は通常シートの走査は行わない。
+            //
+            // さらに、ファイルによっては同じデータを読み込んだ名前付きテーブルが
+            // 複数存在する(例: 「_2024_12売上」「_2024_12売上__2」「_2024_12売上__3」のように
+            // Excelが同名テーブル作成時につける連番の重複コピー)。これを全部結合すると
+            // 同じ売上が2重・3重にカウントされてしまうため、複数見つかった場合は
+            // 行数が最も多い(＝最も完全と思われる)1つだけを採用する。
             tableKindSheets = Table.SelectRows(workbook, each [Kind] = "Table"),
-            tableKindProcessed = List.Select(
+            tableKindProcessedAll = List.Select(
                 List.Transform(tableKindSheets[Data], each fnProcessSheetData(_, fileName, yearMonth)),
                 each _ <> null
             ),
+            tableKindProcessed =
+                if List.IsEmpty(tableKindProcessedAll) then
+                    {}
+                else
+                    {List.Sort(tableKindProcessedAll, (a, b) => Number.From(Table.RowCount(b)) - Number.From(Table.RowCount(a))){0}},
 
             sheetKindSheets = Table.SelectRows(workbook, each [Kind] = "Sheet"),
-            sheetKindProcessed = List.Select(
+            sheetKindProcessedAll = List.Select(
                 List.Transform(sheetKindSheets[Data], each fnProcessSheetData(_, fileName, yearMonth)),
                 each _ <> null
             ),
+            sheetKindProcessed =
+                if List.IsEmpty(sheetKindProcessedAll) then
+                    {}
+                else
+                    {List.Sort(sheetKindProcessedAll, (a, b) => Number.From(Table.RowCount(b)) - Number.From(Table.RowCount(a))){0}},
 
             validTables = if not List.IsEmpty(tableKindProcessed) then tableKindProcessed else sheetKindProcessed
         in
