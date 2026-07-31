@@ -48,17 +48,10 @@ let
         {"ロットNo№", "ロット№"}
     },
 
-    // 1ファイル(1か月分)を読み込み、正規化済みテーブルを返す
-    fnExtractSalesTable = (content as binary, fileName as text) as table =>
+    // 1枚のシート(生データ、ヘッダー未昇格)を処理する。「取引先」ヘッダー行が
+    // 見つからないシートは null を返す(そのシートは対象外とみなす)。
+    fnProcessSheetData = (sheet as table, fileName as text, yearMonth as text) as nullable table =>
         let
-            // ファイル名から年月(6桁)を抽出。"2021.01.xlsx"→"202101" / "202409.xlsx"→"202409"
-            digitsOnly = Text.Select(fileName, {"0".."9"}),
-            yearMonth = Text.Start(digitsOnly, 6),
-
-            workbook = Excel.Workbook(content, true),
-            sheetRow = Table.SelectRows(workbook, each [Kind] = "Sheet"){0},
-            sheet = sheetRow[Data],
-
             indexed = Table.AddIndexColumn(sheet, "__RowIndex", 0, 1),
             otherColNames = List.RemoveItems(Table.ColumnNames(indexed), {"__RowIndex"}),
 
@@ -72,50 +65,73 @@ let
                     )
                 )
             ),
-            headerRowIndex =
+            result =
                 if Table.RowCount(headerMatches) = 0 then
-                    error Error.Record("HeaderNotFound", "ヘッダー行(取引先)が見つかりません: " & fileName)
+                    null
                 else
-                    headerMatches{0}[__RowIndex],
+                    let
+                        headerRowIndex = headerMatches{0}[__RowIndex],
+                        dataFromHeader = Table.Skip(sheet, headerRowIndex),
+                        promoted = Table.PromoteHeaders(dataFromHeader, [PromoteAllScalars = true]),
+                        cleanedHeaders = Table.TransformColumnNames(promoted, fnCleanName),
+                        renamed = Table.RenameColumns(cleanedHeaders, ColumnRenameMap, MissingField.Ignore),
 
-            dataFromHeader = Table.Skip(sheet, headerRowIndex),
-            promoted = Table.PromoteHeaders(dataFromHeader, [PromoteAllScalars = true]),
-            cleanedHeaders = Table.TransformColumnNames(promoted, fnCleanName),
-            renamed = Table.RenameColumns(cleanedHeaders, ColumnRenameMap, MissingField.Ignore),
+                        keyCol =
+                            if List.Contains(Table.ColumnNames(renamed), "取引先") then
+                                "取引先"
+                            else
+                                Table.ColumnNames(renamed){0},
 
-            keyCol =
-                if List.Contains(Table.ColumnNames(renamed), "取引先") then
-                    "取引先"
-                else
-                    Table.ColumnNames(renamed){0},
+                        // シート内に複数回出てくるページ見出し行(値が"取引先"そのもの)と空行を除外
+                        noRepeatedHeaders = Table.SelectRows(
+                            renamed,
+                            each
+                                Record.Field(_, keyCol) <> null
+                                and fnCleanName(Record.Field(_, keyCol)) <> "取引先"
+                                and fnCleanName(Record.Field(_, keyCol)) <> ""
+                        ),
 
-            // シート内に複数回出てくるページ見出し行(値が"取引先"そのもの)と空行を除外
-            noRepeatedHeaders = Table.SelectRows(
-                renamed,
-                each
-                    Record.Field(_, keyCol) <> null
-                    and fnCleanName(Record.Field(_, keyCol)) <> "取引先"
-                    and fnCleanName(Record.Field(_, keyCol)) <> ""
-            ),
+                        // 末尾の合計行(取引先列に会社名でなく件数などの数値が入る)を除外
+                        noFooterTotal = Table.SelectRows(
+                            noRepeatedHeaders,
+                            each
+                                not (
+                                    try Number.From(Record.Field(_, keyCol)) is number
+                                    otherwise false
+                                )
+                        ),
 
-            // 末尾の合計行(取引先列に会社名でなく件数などの数値が入る)を除外
-            noFooterTotal = Table.SelectRows(
-                noRepeatedHeaders,
-                each
-                    not (
-                        try Number.From(Record.Field(_, keyCol)) is number
-                        otherwise false
-                    )
-            ),
-
-            withMeta = Table.AddColumn(
-                Table.AddColumn(noFooterTotal, "年月", each yearMonth, type text),
-                "ソースファイル",
-                each fileName,
-                type text
-            )
+                        withMeta = Table.AddColumn(
+                            Table.AddColumn(noFooterTotal, "年月", each yearMonth, type text),
+                            "ソースファイル",
+                            each fileName,
+                            type text
+                        )
+                    in
+                        withMeta
         in
-            withMeta,
+            result,
+
+    // 1ファイル(1か月分)を読み込み、正規化済みテーブルを返す。
+    // ブック内の全シート/全テーブルを検索し、「取引先」ヘッダーを含むものだけを採用して結合する。
+    // (期によってデータが1枚目のシートにあるとは限らないため、位置決め打ちにしない)
+    fnExtractSalesTable = (content as binary, fileName as text) as table =>
+        let
+            digitsOnly = Text.Select(fileName, {"0".."9"}),
+            yearMonth = Text.Start(digitsOnly, 6),
+
+            workbook = Excel.Workbook(content, true),
+            candidateSheets = Table.SelectRows(workbook, each [Kind] = "Sheet" or [Kind] = "Table"),
+            processedList = List.Transform(
+                candidateSheets[Data],
+                each fnProcessSheetData(_, fileName, yearMonth)
+            ),
+            validTables = List.Select(processedList, each _ <> null)
+        in
+            if List.IsEmpty(validTables) then
+                error Error.Record("HeaderNotFound", "ヘッダー行(取引先)がどのシートにも見つかりません: " & fileName)
+            else
+                Table.Combine(validTables),
 
     // フォルダ配下(サブフォルダ含む)の .xlsx を取得。一時ファイル(~$始まり)は除外
     SourceFiles = Folder.Files(RootFolder),
