@@ -261,6 +261,19 @@ let
             in
                 if List.IsEmpty(nonNulls) then null else nonNulls{0},
         type nullable date
-    )
+    ),
+
+    // 直近の月には、OP(手術)は実施済みだが請求・製品明細の入力がまだ終わっていない
+    // 「処理中」の行が残っている(製品名が空欄かつ税抜売上計も0/null)。
+    // 売上には計上されていないので分析上はノイズになるため除外する。
+    fnIsBlankOrNull = (v as any) as logical => v = null or v = "",
+    IsIncompletePendingRow = (r as record) as logical =>
+        fnIsBlankOrNull(Record.FieldOrDefault(r, "製品名1", null))
+        and fnIsBlankOrNull(Record.FieldOrDefault(r, "製品名2", null))
+        and (
+            Record.FieldOrDefault(r, "税抜売上計", null) = null
+            or Record.FieldOrDefault(r, "税抜売上計", null) = 0
+        ),
+    ExcludedIncompleteRows = Table.SelectRows(WithUnifiedDate, each not IsIncompletePendingRow(_))
 in
-    WithUnifiedDate
+    ExcludedIncompleteRows
