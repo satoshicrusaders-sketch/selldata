@@ -221,6 +221,25 @@ let
         CleanedDateValues,
         List.Transform(ExistingDateCols, each {_, type date}),
         "ja-JP"
+    ),
+
+    // 期によって「売上日」列自体が存在しない期間があるため(11-12期あたりはOP日しかない)、
+    // 3つの日付候補から存在するものを優先順(売上日 > 伝票日付 > OP日)で1本化した
+    // 分析用の日付列を追加する。時系列の軸にはこちらを使うことを推奨。
+    WithUnifiedDate = Table.AddColumn(
+        TypedDates,
+        "取引日",
+        each
+            let
+                candidates = {
+                    Record.FieldOrDefault(_, "売上日", null),
+                    Record.FieldOrDefault(_, "伝票日付", null),
+                    Record.FieldOrDefault(_, "OP日", null)
+                },
+                nonNulls = List.RemoveNulls(candidates)
+            in
+                if List.IsEmpty(nonNulls) then null else nonNulls{0},
+        type nullable date
     )
 in
-    TypedDates
+    WithUnifiedDate
