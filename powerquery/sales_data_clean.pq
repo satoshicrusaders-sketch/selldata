@@ -196,11 +196,29 @@ let
         List.Transform(ExistingNumericCols, each {_, type number})
     ),
 
+    // OP日は手術がある行にしか実際の日付が入らず、器械貸出料や運送料などの
+    // 非手術系の明細行では「1/0」のようなダミー値が入っている。これをそのまま
+    // 日付型に変換すると1899/1900年のあり得ない日付に化けるため、先にnullへ置換する。
+    fnCleanDateValue = (v as any) as any =>
+        if v = null then
+            null
+        else if v is date or v is datetime or v is number then
+            v
+        else
+            let
+                t = Text.Trim(Text.From(v))
+            in
+                if t = "" or Text.EndsWith(t, "/0") or t = "0" then null else v,
+
     // 日付列も、存在するものだけ日付化
     DateColumnCandidates = {"売上日", "OP日", "伝票日付"},
     ExistingDateCols = List.Intersect({Table.ColumnNames(TypedNumeric), DateColumnCandidates}),
-    TypedDates = Table.TransformColumnTypes(
+    CleanedDateValues = Table.TransformColumns(
         TypedNumeric,
+        List.Transform(ExistingDateCols, each {_, fnCleanDateValue})
+    ),
+    TypedDates = Table.TransformColumnTypes(
+        CleanedDateValues,
         List.Transform(ExistingDateCols, each {_, type date}),
         "ja-JP"
     )
