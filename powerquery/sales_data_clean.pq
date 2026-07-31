@@ -185,14 +185,26 @@ let
     // 期によって列構成が違っても Table.Combine が自動で和集合を取り、欠落列をnull補完する
     Combined = Table.Combine(WithParsedTable[ParsedTable]),
 
+    // 金額・数量列にも、注記などが紛れ込んで数値変換できないセルがまれにある。
+    // 日付と同様、変換に失敗した値は問答無用でnullにする(型変換エラーで行ごと壊れるのを防ぐ)。
+    fnCleanNumericValue = (v as any) as nullable number =>
+        if v = null then
+            null
+        else
+            try Number.From(v, "ja-JP") otherwise null,
+
     // 主要な金額・数量列の型を、存在するものだけ数値化(期によって無い列があるため存在チェック)
     NumericColumnCandidates = {
         "売上数量", "価格1", "価格2", "掛率", "売上金額",
         "税抜売上計", "消費税", "税込売上計", "税抜仕入計"
     },
     ExistingNumericCols = List.Intersect({Table.ColumnNames(Combined), NumericColumnCandidates}),
-    TypedNumeric = Table.TransformColumnTypes(
+    CleanedNumericValues = Table.TransformColumns(
         Combined,
+        List.Transform(ExistingNumericCols, each {_, fnCleanNumericValue})
+    ),
+    TypedNumeric = Table.TransformColumnTypes(
+        CleanedNumericValues,
         List.Transform(ExistingNumericCols, each {_, type number})
     ),
 
