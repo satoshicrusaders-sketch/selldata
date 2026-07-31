@@ -212,11 +212,24 @@ let
     // 「1/0」のようなダミー値や、日付として解釈できない文字列が入っていることがある。
     // 個別のパターンを想定して除外するのではなく、実際に日付へ変換を試みて、
     // 失敗した値は問答無用でnullにする(型変換エラーで行ごと壊れるのを防ぐ)。
+    //
+    // 加えて、変換自体は成功しても「0202/03/08」のような桁抜け入力ミスや、
+    // Excelの日付起点由来の「1899/12/30」等、業務上あり得ない日付も混在しているため、
+    // 事業開始(2020年)以降・当面の未来(2030年)まで、という妥当な範囲外の値もnullにする。
+    // (売上金額自体は残るので合計には影響せず、時系列集計でのみ「不明日付」として扱われる)
     fnCleanDateValue = (v as any) as nullable date =>
         if v = null then
             null
         else
-            try Date.From(v, "ja-JP") otherwise null,
+            let
+                parsed = try Date.From(v, "ja-JP") otherwise null
+            in
+                if parsed = null then
+                    null
+                else if parsed < #date(2020, 1, 1) or parsed > #date(2030, 12, 31) then
+                    null
+                else
+                    parsed,
 
     // 日付列も、存在するものだけ日付化
     DateColumnCandidates = {"売上日", "OP日", "伝票日付"},
