@@ -260,28 +260,35 @@ let
         "ja-JP"
     ),
 
-    // 期によって「売上日」列自体が存在しない期間があるため(11-12期あたりはOP日しかない)、
-    // 3つの日付候補から存在するものを優先順(売上日 > 伝票日付 > OP日)で1本化した
-    // 分析用の日付列を追加する。時系列の軸にはこちらを使うことを推奨。
-    //
-    // OP日(製品を使用した日=手術日)と売上日(納品書発行日)は意味が異なる別の日付のため、
-    // OP日を売上日の代わりに使うと会計上の月がズレる(実際に12期の集計値との突き合わせで
-    // 誤差の原因になっていた)。そのためOP日はここでは候補にしない。
-    // なお非表示列であっても Excel.Workbook は関係なく読み込むため、売上日列が
-    // 実際には存在するのに前段のサンプル確認で見えていなかった月がある可能性がある。
+    // OP日(製品を使用した日=手術日)と売上日(納品書発行日)は意味が異なる別の日付。
+    // 本来はOP日を代用すべきではないが、実際のデータでは売上日・伝票日付が
+    // 丸ごと欠落している月がかなりの割合であり(2024年10月・2025年5月・6月など)、
+    // OP日を完全に除外すると集計そのものが3割近く欠落してしまう。
+    // そのため優先順位(売上日 > 伝票日付 > OP日)でOP日を最後の代用として残しつつ、
+    // どの日付源を使ったかを別列「取引日_出所」に記録し、後から検証・除外できるようにする。
     WithUnifiedDate = Table.AddColumn(
-        TypedDates,
-        "取引日",
+        Table.AddColumn(
+            TypedDates,
+            "取引日",
+            each
+                let
+                    candidates = {
+                        Record.FieldOrDefault(_, "売上日", null),
+                        Record.FieldOrDefault(_, "伝票日付", null),
+                        Record.FieldOrDefault(_, "OP日", null)
+                    },
+                    nonNulls = List.RemoveNulls(candidates)
+                in
+                    if List.IsEmpty(nonNulls) then null else nonNulls{0},
+            type nullable date
+        ),
+        "取引日_出所",
         each
-            let
-                candidates = {
-                    Record.FieldOrDefault(_, "売上日", null),
-                    Record.FieldOrDefault(_, "伝票日付", null)
-                },
-                nonNulls = List.RemoveNulls(candidates)
-            in
-                if List.IsEmpty(nonNulls) then null else nonNulls{0},
-        type nullable date
+            if Record.FieldOrDefault(_, "売上日", null) <> null then "売上日"
+            else if Record.FieldOrDefault(_, "伝票日付", null) <> null then "伝票日付"
+            else if Record.FieldOrDefault(_, "OP日", null) <> null then "OP日(代用)"
+            else null,
+        type nullable text
     ),
 
     // 直近の月には、OP(手術)は実施済みだが請求・製品明細の入力がまだ終わっていない
