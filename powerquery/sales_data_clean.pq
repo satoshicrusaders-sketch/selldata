@@ -48,32 +48,51 @@ let
         {"ロットNo№", "ロット№"}
     },
 
-    // 1枚のシート(生データ、ヘッダー未昇格)を処理する。「取引先」ヘッダー行が
-    // 見つからないシートは null を返す(そのシートは対象外とみなす)。
+    // 1枚のシート/テーブル(生データ)を処理する。「取引先」ヘッダーが
+    // 見つからない場合は null を返す(そのシートは対象外とみなす)。
+    //
+    // 2パターンに対応:
+    //   (a) 名前付きテーブル(Excel の ListObject)は Excel.Workbook が最初から
+    //       正式な列名(=「取引先」等)を持つ状態で返してくるので、そのまま使う
+    //   (b) 通常のシートはタイトル行等が混ざった生データなので、
+    //       「取引先」という値を含む行を自前で探してその行をヘッダーに昇格する
     fnProcessSheetData = (sheet as table, fileName as text, yearMonth as text) as nullable table =>
         let
-            indexed = Table.AddIndexColumn(sheet, "__RowIndex", 0, 1),
-            otherColNames = List.RemoveItems(Table.ColumnNames(indexed), {"__RowIndex"}),
+            existingColNamesCleaned = List.Transform(Table.ColumnNames(sheet), fnCleanName),
+            alreadyHasHeader = List.Contains(existingColNamesCleaned, "取引先"),
 
-            // 「取引先」という文字列(スペース除去後)を含む行をヘッダー行とみなす
-            headerMatches = Table.SelectRows(
-                indexed,
-                each List.AnyTrue(
-                    List.Transform(
-                        otherColNames,
-                        (colName) => fnCleanName(Record.Field(_, colName)) = "取引先"
-                    )
-                )
-            ),
+            promotedTable =
+                if alreadyHasHeader then
+                    sheet
+                else
+                    let
+                        indexed = Table.AddIndexColumn(sheet, "__RowIndex", 0, 1),
+                        otherColNames = List.RemoveItems(Table.ColumnNames(indexed), {"__RowIndex"}),
+                        // 「取引先」という文字列(スペース除去後)を含む行をヘッダー行とみなす
+                        headerMatches = Table.SelectRows(
+                            indexed,
+                            each List.AnyTrue(
+                                List.Transform(
+                                    otherColNames,
+                                    (colName) => fnCleanName(Record.Field(_, colName)) = "取引先"
+                                )
+                            )
+                        )
+                    in
+                        if Table.RowCount(headerMatches) = 0 then
+                            null
+                        else
+                            Table.PromoteHeaders(
+                                Table.Skip(sheet, headerMatches{0}[__RowIndex]),
+                                [PromoteAllScalars = true]
+                            ),
+
             result =
-                if Table.RowCount(headerMatches) = 0 then
+                if promotedTable = null then
                     null
                 else
                     let
-                        headerRowIndex = headerMatches{0}[__RowIndex],
-                        dataFromHeader = Table.Skip(sheet, headerRowIndex),
-                        promoted = Table.PromoteHeaders(dataFromHeader, [PromoteAllScalars = true]),
-                        cleanedHeaders = Table.TransformColumnNames(promoted, fnCleanName),
+                        cleanedHeaders = Table.TransformColumnNames(promotedTable, fnCleanName),
                         renamed = Table.RenameColumns(cleanedHeaders, ColumnRenameMap, MissingField.Ignore),
 
                         keyCol =
@@ -120,16 +139,30 @@ let
             digitsOnly = Text.Select(fileName, {"0".."9"}),
             yearMonth = Text.Start(digitsOnly, 6),
 
-            workbook = Excel.Workbook(content, true),
-            candidateSheets = Table.SelectRows(workbook, each [Kind] = "Sheet" or [Kind] = "Table"),
-            processedList = List.Transform(
-                candidateSheets[Data],
-                each fnProcessSheetData(_, fileName, yearMonth)
+            // useHeaders を null にして、通常シートは生データ(未昇格)のまま受け取る。
+            // (true にすると先頭行=タイトル行が誤ってヘッダー化され、本来の
+            //  ヘッダー行(取引先...)を永久に見失うため)
+            workbook = Excel.Workbook(content, null),
+
+            // 名前付きテーブル(ListObject)は、その裏にある通常シートの一部の範囲でもあるため、
+            // 両方処理すると同じ行が二重に読み込まれる。名前付きテーブルがあればそれを優先し、
+            // 見つかった場合は通常シートの走査は行わない。
+            tableKindSheets = Table.SelectRows(workbook, each [Kind] = "Table"),
+            tableKindProcessed = List.Select(
+                List.Transform(tableKindSheets[Data], each fnProcessSheetData(_, fileName, yearMonth)),
+                each _ <> null
             ),
-            validTables = List.Select(processedList, each _ <> null)
+
+            sheetKindSheets = Table.SelectRows(workbook, each [Kind] = "Sheet"),
+            sheetKindProcessed = List.Select(
+                List.Transform(sheetKindSheets[Data], each fnProcessSheetData(_, fileName, yearMonth)),
+                each _ <> null
+            ),
+
+            validTables = if not List.IsEmpty(tableKindProcessed) then tableKindProcessed else sheetKindProcessed
         in
             if List.IsEmpty(validTables) then
-                error Error.Record("HeaderNotFound", "ヘッダー行(取引先)がどのシートにも見つかりません: " & fileName)
+                error Error.Record("HeaderNotFound", "ヘッダー行(取引先)がどのシート/テーブルにも見つかりません: " & fileName)
             else
                 Table.Combine(validTables),
 
