@@ -1,0 +1,159 @@
+// ============================================================================
+// 販売実績（月次一覧）スクリーニング用 Power Query M スクリプト
+//
+// 対象: OneDrive for Business / SharePoint 上の
+//   07. 売上関連 / 月次一覧 - コピー / [8期|9期|10期|11期|12期|13期] / YYYY.MM.xlsx (or YYYYMM.xlsx)
+//
+// 使い方:
+//   1. Power BI Desktop > Power Query エディター > 新しいクエリ > 空のクエリ
+//   2. 詳細エディター(Advanced Editor)を開き、このファイルの中身を丸ごと貼り付け
+//   3. 下の RootFolder の値を、実際にOneDriveが同期されているローカルパスに書き換える
+//      (例: "C:\Users\sfuru\OneDrive - M'z company\07. 売上関連\月次一覧 - コピー")
+//   4. クエリ名を「売上実績_統合」などに変更して保存・更新
+//
+// このスクリプトが自動で行うこと:
+//   - フォルダ配下(期ごとのサブフォルダを含む)の全 .xlsx を再帰的に取得
+//   - ファイル名から年月を抽出(「2021.01.xlsx」「202409.xlsx」の両方に対応)
+//   - シート内でヘッダー行(「取引先」を含む行)を自動検出し、その手前のタイトル行を除去
+//   - 列名の表記ゆれを統一(例: 「メーカー」→「メーカー①」、「ロットNo」→「ロット№」)
+//   - シート内に複数回登場するページ見出し行・合計行を除外
+//   - 期によって列構成が違っても Table.Combine が自動で欠落列をnull補完し、1つの表に統合
+//
+// 注意:
+//   - 期によって列構成が大きく異なる(例: 11-12期は数量/単価/担当者列が存在しない)ため、
+//     結合後のテーブルではこれらの列が期によって空欄になるのは仕様です。
+//   - 実際のシート名やヘッダー位置がここで想定した構造と異なる月がある場合、
+//     fnExtractSalesTable 内でエラーが出るので、そのファイルだけ個別に確認してください。
+// ============================================================================
+
+let
+    RootFolder = "C:\Users\sfuru\OneDrive - M'z company\07. 売上関連\月次一覧 - コピー",
+
+    // ヘッダー/列名から半角・全角スペースと改行を除去して比較しやすくする(null安全)
+    fnCleanName = (n as any) as text =>
+        let
+            t = if n = null then "" else Text.From(n),
+            noHalfSpace = Text.Replace(t, " ", ""),
+            noFullSpace = Text.Replace(noHalfSpace, "　", ""),
+            noLineBreak = Text.Replace(Text.Replace(noFullSpace, "#(lf)", ""), "#(cr)", "")
+        in
+            Text.Trim(noLineBreak),
+
+    // 列名の表記ゆれ統一マップ(実データ変更のみ差分登録。ほとんどの列は元々統一名)
+    ColumnRenameMap = {
+        {"メーカー", "メーカー①"},
+        {"ロットNo", "ロット№"},
+        {"ロットNo.", "ロット№"},
+        {"ロットNO", "ロット№"},
+        {"ロットNo№", "ロット№"}
+    },
+
+    // 1ファイル(1か月分)を読み込み、正規化済みテーブルを返す
+    fnExtractSalesTable = (content as binary, fileName as text) as table =>
+        let
+            // ファイル名から年月(6桁)を抽出。"2021.01.xlsx"→"202101" / "202409.xlsx"→"202409"
+            digitsOnly = Text.Select(fileName, {"0".."9"}),
+            yearMonth = Text.Start(digitsOnly, 6),
+
+            workbook = Excel.Workbook(content, true),
+            sheetRow = Table.SelectRows(workbook, each [Kind] = "Sheet"){0},
+            sheet = sheetRow[Data],
+
+            indexed = Table.AddIndexColumn(sheet, "__RowIndex", 0, 1),
+            otherColNames = List.RemoveItems(Table.ColumnNames(indexed), {"__RowIndex"}),
+
+            // 「取引先」という文字列(スペース除去後)を含む行をヘッダー行とみなす
+            headerMatches = Table.SelectRows(
+                indexed,
+                each List.AnyTrue(
+                    List.Transform(
+                        otherColNames,
+                        (colName) => fnCleanName(Record.Field(_, colName)) = "取引先"
+                    )
+                )
+            ),
+            headerRowIndex =
+                if Table.RowCount(headerMatches) = 0 then
+                    error Error.Record("HeaderNotFound", "ヘッダー行(取引先)が見つかりません: " & fileName)
+                else
+                    headerMatches{0}[__RowIndex],
+
+            dataFromHeader = Table.Skip(sheet, headerRowIndex),
+            promoted = Table.PromoteHeaders(dataFromHeader, [PromoteAllScalars = true]),
+            cleanedHeaders = Table.TransformColumnNames(promoted, fnCleanName),
+            renamed = Table.RenameColumns(cleanedHeaders, ColumnRenameMap, MissingField.Ignore),
+
+            keyCol =
+                if List.Contains(Table.ColumnNames(renamed), "取引先") then
+                    "取引先"
+                else
+                    Table.ColumnNames(renamed){0},
+
+            // シート内に複数回出てくるページ見出し行(値が"取引先"そのもの)と空行を除外
+            noRepeatedHeaders = Table.SelectRows(
+                renamed,
+                each
+                    Record.Field(_, keyCol) <> null
+                    and fnCleanName(Record.Field(_, keyCol)) <> "取引先"
+                    and fnCleanName(Record.Field(_, keyCol)) <> ""
+            ),
+
+            // 末尾の合計行(取引先列に会社名でなく件数などの数値が入る)を除外
+            noFooterTotal = Table.SelectRows(
+                noRepeatedHeaders,
+                each
+                    not (
+                        try Number.From(Record.Field(_, keyCol)) is number
+                        otherwise false
+                    )
+            ),
+
+            withMeta = Table.AddColumn(
+                Table.AddColumn(noFooterTotal, "年月", each yearMonth, type text),
+                "ソースファイル",
+                each fileName,
+                type text
+            )
+        in
+            withMeta,
+
+    // フォルダ配下(サブフォルダ含む)の .xlsx を取得。一時ファイル(~$始まり)は除外
+    SourceFiles = Folder.Files(RootFolder),
+    XlsxFiles = Table.SelectRows(
+        SourceFiles,
+        each
+            Text.EndsWith([Extension], ".xlsx")
+            and not Text.StartsWith([Name], "~$")
+    ),
+
+    WithParsedTable = Table.AddColumn(
+        XlsxFiles,
+        "ParsedTable",
+        each fnExtractSalesTable([Content], [Name]),
+        type table
+    ),
+
+    // 期によって列構成が違っても Table.Combine が自動で和集合を取り、欠落列をnull補完する
+    Combined = Table.Combine(WithParsedTable[ParsedTable]),
+
+    // 主要な金額・数量列の型を、存在するものだけ数値化(期によって無い列があるため存在チェック)
+    NumericColumnCandidates = {
+        "売上数量", "価格1", "価格2", "掛率", "売上金額",
+        "税抜売上計", "消費税", "税込売上計", "税抜仕入計"
+    },
+    ExistingNumericCols = List.Intersect({Table.ColumnNames(Combined), NumericColumnCandidates}),
+    TypedNumeric = Table.TransformColumnTypes(
+        Combined,
+        List.Transform(ExistingNumericCols, each {_, type number})
+    ),
+
+    // 日付列も、存在するものだけ日付化
+    DateColumnCandidates = {"売上日", "OP日", "伝票日付"},
+    ExistingDateCols = List.Intersect({Table.ColumnNames(TypedNumeric), DateColumnCandidates}),
+    TypedDates = Table.TransformColumnTypes(
+        TypedNumeric,
+        List.Transform(ExistingDateCols, each {_, type date}),
+        "ja-JP"
+    )
+in
+    TypedDates
