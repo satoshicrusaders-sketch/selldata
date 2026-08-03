@@ -433,9 +433,20 @@ let
 
     // 取引先(代理店)マスタとの突き合わせ:
     //   ①伝票番号1(=貸出先コード。代理店コード2桁+病院コード3桁)が完全一致する行を優先
-    //   ②見つからなければ、取引先の表記を正規化した上で代理店名称/代理店略称と一致するものを採用
+    //   ②見つからなければ、取引先の表記を正規化した上で代理店略称と一致するものを正式名称に変換
     //   ③どちらも見つからなければ、正規化だけした元の取引先表記を残す(消さない)
+    //
+    // 注意: 取引先マスタは「代理店×病院」の組み合わせごとに1行あるため、同じ代理店が
+    // 何十行にもわたって登場する(名称もコードも一意ではない)。そのままTable.NestedJoinで
+    // 突き合わせると、一致した行数だけ売上実績側の行が複製されてしまう重大なバグになるため、
+    // ①は一意な「貸出先コード」で、②は代理店略称だけを重複排除した小さい対応表を作ってから
+    // 突き合わせる(どちらも売上実績側の行数を絶対に増やさない設計にする)。
     DistributorMaster = 取引先マスタ,
+
+    AbbrevToNameLookup = Table.Distinct(
+        Table.SelectColumns(DistributorMaster, {"代理店略称", "代理店名称"}),
+        {"代理店略称"}
+    ),
 
     WithSlipNoText = Table.AddColumn(
         FinalCleaned,
@@ -460,19 +471,9 @@ let
         each fnCollapseWhitespace(Record.FieldOrDefault(_, "取引先", null)),
         type nullable text
     ),
-    MergedByDistName = Table.NestedJoin(
-        WithTrimmedDistributorName, {"取引先_マッチ用"},
-        DistributorMaster, {"代理店名称"},
-        "マスタ_名称一致", JoinKind.LeftOuter
-    ),
-    ExpandedByDistName = Table.ExpandTableColumn(
-        MergedByDistName, "マスタ_名称一致",
-        {"代理店名称"},
-        {"取引先_名称一致"}
-    ),
     MergedByDistAbbrev = Table.NestedJoin(
-        ExpandedByDistName, {"取引先_マッチ用"},
-        DistributorMaster, {"代理店略称"},
+        WithTrimmedDistributorName, {"取引先_マッチ用"},
+        AbbrevToNameLookup, {"代理店略称"},
         "マスタ_略称一致", JoinKind.LeftOuter
     ),
     ExpandedByDistAbbrev = Table.ExpandTableColumn(
@@ -487,13 +488,10 @@ let
         each
             let
                 byCode = Record.FieldOrDefault(_, "取引先_伝票一致", null),
-                byName = Record.FieldOrDefault(_, "取引先_名称一致", null),
                 byAbbrev = Record.FieldOrDefault(_, "取引先_略称一致", null)
             in
                 if byCode <> null then
                     byCode
-                else if byName <> null then
-                    byName
                 else if byAbbrev <> null then
                     byAbbrev
                 else
@@ -503,7 +501,7 @@ let
 
     FinalWithDistributor = Table.RemoveColumns(
         WithResolvedDistributor,
-        {"伝票番号1_テキスト", "取引先_伝票一致", "取引先_マッチ用", "取引先_名称一致", "取引先_略称一致"}
+        {"伝票番号1_テキスト", "取引先_伝票一致", "取引先_マッチ用", "取引先_略称一致"}
     ),
 
     // メーカー名の半角カナを全角カナに統一する(マスタが無いため機械的な正規化のみ)
