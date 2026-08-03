@@ -237,6 +237,55 @@ let
         List.Transform(ExistingNumericCols, each {_, type number})
     ),
 
+    // 一部の月(特に2021年9月前後)は「税抜売上計」「税込売上計」が空欄で、
+    // 代わりに「売上金額」(数量×単価×掛率)に実際の売上金額が入っている。
+    // これに気づかず放置すると、その月だけ売上が計上されず仕入だけ残るため、
+    // 粗利が大きくマイナスになる重大な集計誤りになっていた。
+    // 「税抜売上計」が空欄の行だけ「売上金額」で補完し、「税込売上計」も
+    // 空欄なら補完後の税抜売上計から10%消費税を足して計算する。
+    WithRevenueFallback =
+        if List.Contains(Table.ColumnNames(TypedNumeric), "税抜売上計") and List.Contains(Table.ColumnNames(TypedNumeric), "売上金額") then
+            let
+                fixedExTax = Table.AddColumn(
+                    TypedNumeric,
+                    "税抜売上計_補完",
+                    each
+                        let
+                            exTax = Record.FieldOrDefault(_, "税抜売上計", null),
+                            fallback = Record.FieldOrDefault(_, "売上金額", null)
+                        in
+                            if exTax <> null then exTax else fallback,
+                    type nullable number
+                ),
+                fixedIncTax =
+                    if List.Contains(Table.ColumnNames(TypedNumeric), "税込売上計") then
+                        Table.AddColumn(
+                            fixedExTax,
+                            "税込売上計_補完",
+                            each
+                                let
+                                    incTax = Record.FieldOrDefault(_, "税込売上計", null),
+                                    exTaxFixed = Record.FieldOrDefault(_, "税抜売上計_補完", null)
+                                in
+                                    if incTax <> null then incTax else if exTaxFixed <> null then exTaxFixed * 1.1 else null,
+                            type nullable number
+                        )
+                    else
+                        fixedExTax,
+                colsToDrop = List.Intersect({Table.ColumnNames(fixedIncTax), {"税抜売上計", "税込売上計"}}),
+                dropped = Table.RemoveColumns(fixedIncTax, colsToDrop),
+                renamed = Table.RenameColumns(
+                    dropped,
+                    List.Select(
+                        {{"税抜売上計_補完", "税抜売上計"}, {"税込売上計_補完", "税込売上計"}},
+                        each List.Contains(Table.ColumnNames(dropped), _{0})
+                    )
+                )
+            in
+                renamed
+        else
+            TypedNumeric,
+
     // OP日・伝票日付・売上日は、手術がない明細行(運送料・器械貸出料など)では
     // 「1/0」のようなダミー値や、日付として解釈できない文字列が入っていることがある。
     // 個別のパターンを想定して除外するのではなく、実際に日付へ変換を試みて、
@@ -262,9 +311,9 @@ let
 
     // 日付列も、存在するものだけ日付化
     DateColumnCandidates = {"売上日", "OP日", "伝票日付"},
-    ExistingDateCols = List.Intersect({Table.ColumnNames(TypedNumeric), DateColumnCandidates}),
+    ExistingDateCols = List.Intersect({Table.ColumnNames(WithRevenueFallback), DateColumnCandidates}),
     CleanedDateValues = Table.TransformColumns(
-        TypedNumeric,
+        WithRevenueFallback,
         List.Transform(ExistingDateCols, each {_, fnCleanDateValue})
     ),
     TypedDates = Table.TransformColumnTypes(
