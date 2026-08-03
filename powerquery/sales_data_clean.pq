@@ -4,6 +4,11 @@
 // 対象: OneDrive for Business / SharePoint 上の
 //   07. 売上関連 / 月次一覧 - コピー / [8期|9期|10期|11期|12期|13期] / YYYY.MM.xlsx (or YYYYMM.xlsx)
 //
+// 前提:
+//   同じPower BIファイル内に「病院マスタ」という名前のクエリ(hospital_master.pq)が
+//   すでに作成済みであること。このスクリプトはその名前でクエリを参照するため、
+//   「病院マスタ」を先に作成・実行してから、このクエリを作成すること。
+//
 // 使い方:
 //   1. Power BI Desktop > Power Query エディター > 新しいクエリ > 空のクエリ
 //   2. 詳細エディター(Advanced Editor)を開き、このファイルの中身を丸ごと貼り付け
@@ -18,6 +23,8 @@
 //   - 列名の表記ゆれを統一(例: 「メーカー」→「メーカー①」、「ロットNo」→「ロット№」)
 //   - シート内に複数回登場するページ見出し行・合計行を除外
 //   - 期によって列構成が違っても Table.Combine が自動で欠落列をnull補完し、1つの表に統合
+//   - 病院コード(伝票番号1の下3桁 → 取れなければSource.Nameの●と-の間の下3桁)を抽出し、
+//     病院マスタとコード一致→(だめなら)病院名一致の優先順で住所・電話番号・URLを直接マージ
 //
 // 注意:
 //   - 期によって列構成が大きく異なる(例: 11-12期は数量/単価/担当者列が存在しない)ため、
@@ -315,11 +322,95 @@ let
                 padded = Text.PadStart(trimmed, 3, "0")
             in
                 if trimmed = "" then null else Text.End(padded, 3),
+
+    // 伝票番号1が無い行向けの代替: Source.Name列の「●xxxx-xxxxx」パターンから
+    // 「●」と「-」の間の数字の下3桁を取り出す
+    fnHospitalCodeFromSourceName = (v as any) as nullable text =>
+        if v = null then
+            null
+        else
+            let
+                t = Text.From(v),
+                afterMark = if Text.Contains(t, "●") then Text.AfterDelimiter(t, "●") else null,
+                beforeDash =
+                    if afterMark <> null and Text.Contains(afterMark, "-") then
+                        Text.BeforeDelimiter(afterMark, "-")
+                    else
+                        null,
+                digitsOnly = if beforeDash <> null then Text.Select(beforeDash, {"0".."9"}) else null
+            in
+                if digitsOnly = null or digitsOnly = "" then null else Text.End(Text.PadStart(digitsOnly, 3, "0"), 3),
+
     WithHospitalCode = Table.AddColumn(
         ExcludedIncompleteRows,
         "病院コード",
-        each fnHospitalCodeFromSlipNo(Record.FieldOrDefault(_, "伝票番号1", null)),
+        each
+            let
+                fromSlipNo = fnHospitalCodeFromSlipNo(Record.FieldOrDefault(_, "伝票番号1", null))
+            in
+                if fromSlipNo <> null then
+                    fromSlipNo
+                else
+                    fnHospitalCodeFromSourceName(Record.FieldOrDefault(_, "Source.Name", null)),
         type nullable text
+    ),
+
+    // 病院名の表記ゆれ(前後の空白等)を吸収するための照合用トリム列
+    WithTrimmedHospitalName = Table.AddColumn(
+        WithHospitalCode,
+        "病院名_マッチ用",
+        each Text.Trim(Text.From(Record.FieldOrDefault(_, "病院名", ""))),
+        type text
+    ),
+
+    // 病院マスタ(同じPower BIファイル内の別クエリ)を参照し、
+    // ①病院コード一致 → ②(コードで見つからない場合のみ)病院名一致 の優先順で
+    // 住所・電話番号・URLを解決して直接マージする
+    HospitalMaster = 病院マスタ,
+
+    MergedByCode = Table.NestedJoin(
+        WithTrimmedHospitalName, {"病院コード"},
+        HospitalMaster, {"コード"},
+        "マスタ_コード一致", JoinKind.LeftOuter
+    ),
+    ExpandedByCode = Table.ExpandTableColumn(
+        MergedByCode, "マスタ_コード一致",
+        {"住所", "電話番号", "URL"},
+        {"住所_コード", "電話番号_コード", "URL_コード"}
+    ),
+
+    MergedByName = Table.NestedJoin(
+        ExpandedByCode, {"病院名_マッチ用"},
+        HospitalMaster, {"名称"},
+        "マスタ_名称一致", JoinKind.LeftOuter
+    ),
+    ExpandedByName = Table.ExpandTableColumn(
+        MergedByName, "マスタ_名称一致",
+        {"住所", "電話番号", "URL"},
+        {"住所_名称", "電話番号_名称", "URL_名称"}
+    ),
+
+    fnFirstNonNull = (a as any, b as any) as any => if a <> null then a else b,
+    WithResolvedMaster = Table.AddColumn(
+        Table.AddColumn(
+            Table.AddColumn(
+                ExpandedByName,
+                "住所",
+                each fnFirstNonNull(Record.FieldOrDefault(_, "住所_コード", null), Record.FieldOrDefault(_, "住所_名称", null)),
+                type nullable text
+            ),
+            "電話番号",
+            each fnFirstNonNull(Record.FieldOrDefault(_, "電話番号_コード", null), Record.FieldOrDefault(_, "電話番号_名称", null)),
+            type nullable text
+        ),
+        "URL",
+        each fnFirstNonNull(Record.FieldOrDefault(_, "URL_コード", null), Record.FieldOrDefault(_, "URL_名称", null)),
+        type nullable text
+    ),
+
+    FinalCleaned = Table.RemoveColumns(
+        WithResolvedMaster,
+        {"病院名_マッチ用", "住所_コード", "電話番号_コード", "URL_コード", "住所_名称", "電話番号_名称", "URL_名称"}
     )
 in
-    WithHospitalCode
+    FinalCleaned
