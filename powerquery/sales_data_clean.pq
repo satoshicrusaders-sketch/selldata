@@ -138,9 +138,17 @@ let
                             "ソースファイル",
                             each fileName,
                             type text
-                        )
+                        ),
+
+                        // 元のExcelファイル自体に、コピー&ペースト等で全く同じ内容の行が
+                        // 複数回入っていることがある(実際に2022.03で1874行中724行が
+                        // 完全重複と判明)。同一ファイル内で全列が完全に一致する行は
+                        // 1件にまとめる(全期間をまたいで重複排除すると、たまたま値が
+                        // 一致しただけの別々の取引まで消してしまう恐れがあるため、
+                        // あくまで同じファイル内だけで行う)
+                        deduplicatedWithinFile = Table.Distinct(withMeta)
                     in
-                        withMeta
+                        deduplicatedWithinFile
         in
             result,
 
