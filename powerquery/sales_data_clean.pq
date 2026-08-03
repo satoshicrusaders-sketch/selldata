@@ -5,9 +5,11 @@
 //   07. 売上関連 / 月次一覧 - コピー / [8期|9期|10期|11期|12期|13期] / YYYY.MM.xlsx (or YYYYMM.xlsx)
 //
 // 前提:
-//   同じPower BIファイル内に「病院マスタ」という名前のクエリ(hospital_master.pq)が
-//   すでに作成済みであること。このスクリプトはその名前でクエリを参照するため、
-//   「病院マスタ」を先に作成・実行してから、このクエリを作成すること。
+//   同じPower BIファイル内に、以下2つのクエリがすでに作成済みであること
+//   (このスクリプトはクエリ名で直接参照するため、先にこれらを作成・実行してから
+//    このクエリを作成すること)。
+//     - 「病院マスタ」  (hospital_master.pq)
+//     - 「取引先マスタ」(distributor_master.pq)
 //
 // 使い方:
 //   1. Power BI Desktop > Power Query エディター > 新しいクエリ > 空のクエリ
@@ -25,6 +27,10 @@
 //   - 期によって列構成が違っても Table.Combine が自動で欠落列をnull補完し、1つの表に統合
 //   - 病院コード(伝票番号1の下3桁 → 取れなければSource.Nameの●と-の間の下3桁)を抽出し、
 //     病院マスタとコード一致→(だめなら)病院名一致の優先順で住所・電話番号・URLを直接マージ
+//   - 伝票番号1(=貸出先コード)→(だめなら)取引先名/略称一致の優先順で、
+//     取引先マスタから正式な取引先名称を「取引先_統一」列として解決
+//   - メーカー①②③の半角カナを全角カナに正規化し、前後・連続スペースを統一
+//     (メーカー専用マスタは無いため機械的な正規化のみ)
 //
 // 注意:
 //   - 期によって列構成が大きく異なる(例: 11-12期は数量/単価/担当者列が存在しない)ため、
@@ -411,6 +417,138 @@ let
     FinalCleaned = Table.RemoveColumns(
         WithResolvedMaster,
         {"病院名_マッチ用", "住所_コード", "電話番号_コード", "URL_コード", "住所_名称", "電話番号_名称", "URL_名称"}
+    ),
+
+    // 前後・連続する全角/半角スペースを1つの半角スペースに正規化する(null安全)
+    fnCollapseWhitespace = (v as any) as nullable text =>
+        if v = null then
+            null
+        else
+            let
+                t = Text.Replace(Text.From(v), "　", " "),
+                collapsed = Text.Combine(List.Select(Text.Split(t, " "), each _ <> ""), " "),
+                trimmed = Text.Trim(collapsed)
+            in
+                if trimmed = "" then null else trimmed,
+
+    // 取引先(代理店)マスタとの突き合わせ:
+    //   ①伝票番号1(=貸出先コード。代理店コード2桁+病院コード3桁)が完全一致する行を優先
+    //   ②見つからなければ、取引先の表記を正規化した上で代理店名称/代理店略称と一致するものを採用
+    //   ③どちらも見つからなければ、正規化だけした元の取引先表記を残す(消さない)
+    DistributorMaster = 取引先マスタ,
+
+    WithSlipNoText = Table.AddColumn(
+        FinalCleaned,
+        "伝票番号1_テキスト",
+        each fnCollapseWhitespace(Record.FieldOrDefault(_, "伝票番号1", null)),
+        type nullable text
+    ),
+    MergedByDistCode = Table.NestedJoin(
+        WithSlipNoText, {"伝票番号1_テキスト"},
+        DistributorMaster, {"貸出先コード"},
+        "マスタ_伝票番号一致", JoinKind.LeftOuter
+    ),
+    ExpandedByDistCode = Table.ExpandTableColumn(
+        MergedByDistCode, "マスタ_伝票番号一致",
+        {"代理店名称"},
+        {"取引先_伝票一致"}
+    ),
+
+    WithTrimmedDistributorName = Table.AddColumn(
+        ExpandedByDistCode,
+        "取引先_マッチ用",
+        each fnCollapseWhitespace(Record.FieldOrDefault(_, "取引先", null)),
+        type nullable text
+    ),
+    MergedByDistName = Table.NestedJoin(
+        WithTrimmedDistributorName, {"取引先_マッチ用"},
+        DistributorMaster, {"代理店名称"},
+        "マスタ_名称一致", JoinKind.LeftOuter
+    ),
+    ExpandedByDistName = Table.ExpandTableColumn(
+        MergedByDistName, "マスタ_名称一致",
+        {"代理店名称"},
+        {"取引先_名称一致"}
+    ),
+    MergedByDistAbbrev = Table.NestedJoin(
+        ExpandedByDistName, {"取引先_マッチ用"},
+        DistributorMaster, {"代理店略称"},
+        "マスタ_略称一致", JoinKind.LeftOuter
+    ),
+    ExpandedByDistAbbrev = Table.ExpandTableColumn(
+        MergedByDistAbbrev, "マスタ_略称一致",
+        {"代理店名称"},
+        {"取引先_略称一致"}
+    ),
+
+    WithResolvedDistributor = Table.AddColumn(
+        ExpandedByDistAbbrev,
+        "取引先_統一",
+        each
+            let
+                byCode = Record.FieldOrDefault(_, "取引先_伝票一致", null),
+                byName = Record.FieldOrDefault(_, "取引先_名称一致", null),
+                byAbbrev = Record.FieldOrDefault(_, "取引先_略称一致", null)
+            in
+                if byCode <> null then
+                    byCode
+                else if byName <> null then
+                    byName
+                else if byAbbrev <> null then
+                    byAbbrev
+                else
+                    fnCollapseWhitespace(Record.FieldOrDefault(_, "取引先", null)),
+        type nullable text
+    ),
+
+    FinalWithDistributor = Table.RemoveColumns(
+        WithResolvedDistributor,
+        {"伝票番号1_テキスト", "取引先_伝票一致", "取引先_マッチ用", "取引先_名称一致", "取引先_略称一致"}
+    ),
+
+    // メーカー名の半角カナを全角カナに統一する(マスタが無いため機械的な正規化のみ)
+    HalfToFullKanaCombos = {
+        {"ｶﾞ", "ガ"}, {"ｷﾞ", "ギ"}, {"ｸﾞ", "グ"}, {"ｹﾞ", "ゲ"}, {"ｺﾞ", "ゴ"},
+        {"ｻﾞ", "ザ"}, {"ｼﾞ", "ジ"}, {"ｽﾞ", "ズ"}, {"ｾﾞ", "ゼ"}, {"ｿﾞ", "ゾ"},
+        {"ﾀﾞ", "ダ"}, {"ﾁﾞ", "ヂ"}, {"ﾂﾞ", "ヅ"}, {"ﾃﾞ", "デ"}, {"ﾄﾞ", "ド"},
+        {"ﾊﾞ", "バ"}, {"ﾋﾞ", "ビ"}, {"ﾌﾞ", "ブ"}, {"ﾍﾞ", "ベ"}, {"ﾎﾞ", "ボ"},
+        {"ﾊﾟ", "パ"}, {"ﾋﾟ", "ピ"}, {"ﾌﾟ", "プ"}, {"ﾍﾟ", "ペ"}, {"ﾎﾟ", "ポ"},
+        {"ｳﾞ", "ヴ"}
+    },
+    HalfToFullKanaSingles = {
+        {"ｱ", "ア"}, {"ｲ", "イ"}, {"ｳ", "ウ"}, {"ｴ", "エ"}, {"ｵ", "オ"},
+        {"ｶ", "カ"}, {"ｷ", "キ"}, {"ｸ", "ク"}, {"ｹ", "ケ"}, {"ｺ", "コ"},
+        {"ｻ", "サ"}, {"ｼ", "シ"}, {"ｽ", "ス"}, {"ｾ", "セ"}, {"ｿ", "ソ"},
+        {"ﾀ", "タ"}, {"ﾁ", "チ"}, {"ﾂ", "ツ"}, {"ﾃ", "テ"}, {"ﾄ", "ト"},
+        {"ﾅ", "ナ"}, {"ﾆ", "ニ"}, {"ﾇ", "ヌ"}, {"ﾈ", "ネ"}, {"ﾉ", "ノ"},
+        {"ﾊ", "ハ"}, {"ﾋ", "ヒ"}, {"ﾌ", "フ"}, {"ﾍ", "ヘ"}, {"ﾎ", "ホ"},
+        {"ﾏ", "マ"}, {"ﾐ", "ミ"}, {"ﾑ", "ム"}, {"ﾒ", "メ"}, {"ﾓ", "モ"},
+        {"ﾔ", "ヤ"}, {"ﾕ", "ユ"}, {"ﾖ", "ヨ"},
+        {"ﾗ", "ラ"}, {"ﾘ", "リ"}, {"ﾙ", "ル"}, {"ﾚ", "レ"}, {"ﾛ", "ロ"},
+        {"ﾜ", "ワ"}, {"ｦ", "ヲ"}, {"ﾝ", "ン"},
+        {"ｧ", "ァ"}, {"ｨ", "ィ"}, {"ｩ", "ゥ"}, {"ｪ", "ェ"}, {"ｫ", "ォ"},
+        {"ｬ", "ャ"}, {"ｭ", "ュ"}, {"ｮ", "ョ"},
+        {"ｯ", "ッ"}, {"ｰ", "ー"},
+        {"｡", "。"}, {"｢", "「"}, {"｣", "」"}, {"､", "、"}, {"･", "・"}
+    },
+    fnHalfToFullKana = (v as any) as text =>
+        let
+            t = if v = null then "" else Text.From(v),
+            step1 = List.Accumulate(HalfToFullKanaCombos, t, (state, pair) => Text.Replace(state, pair{0}, pair{1})),
+            step2 = List.Accumulate(HalfToFullKanaSingles, step1, (state, pair) => Text.Replace(state, pair{0}, pair{1}))
+        in
+            step2,
+    fnNormalizeMakerName = (v as any) as nullable text =>
+        if v = null then
+            null
+        else
+            fnCollapseWhitespace(fnHalfToFullKana(v)),
+
+    MakerColumnCandidates = {"メーカー①", "メーカー②", "メーカー③"},
+    ExistingMakerCols = List.Intersect({Table.ColumnNames(FinalWithDistributor), MakerColumnCandidates}),
+    FinalWithMaker = Table.TransformColumns(
+        FinalWithDistributor,
+        List.Transform(ExistingMakerCols, each {_, fnNormalizeMakerName})
     )
 in
-    FinalCleaned
+    FinalWithMaker
