@@ -302,6 +302,24 @@ let
             Record.FieldOrDefault(r, "税抜売上計", null) = null
             or Record.FieldOrDefault(r, "税抜売上計", null) = 0
         ),
-    ExcludedIncompleteRows = Table.SelectRows(WithUnifiedDate, each not IsIncompletePendingRow(_))
+    ExcludedIncompleteRows = Table.SelectRows(WithUnifiedDate, each not IsIncompletePendingRow(_)),
+
+    // 病院マスタの「コード」は、伝票番号1の下3桁と対応している。
+    // 伝票番号1列が存在しない期間の行は病院コードもnullになる。
+    fnHospitalCodeFromSlipNo = (v as any) as nullable text =>
+        if v = null then
+            null
+        else
+            let
+                trimmed = Text.Trim(Text.From(v)),
+                padded = Text.PadStart(trimmed, 3, "0")
+            in
+                if trimmed = "" then null else Text.End(padded, 3),
+    WithHospitalCode = Table.AddColumn(
+        ExcludedIncompleteRows,
+        "病院コード",
+        each fnHospitalCodeFromSlipNo(Record.FieldOrDefault(_, "伝票番号1", null)),
+        type nullable text
+    )
 in
-    ExcludedIncompleteRows
+    WithHospitalCode
