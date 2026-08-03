@@ -142,11 +142,22 @@ let
 
                         // 元のExcelファイル自体に、コピー&ペースト等で全く同じ内容の行が
                         // 複数回入っていることがある(実際に2022.03で1874行中724行が
-                        // 完全重複と判明)。同一ファイル内で全列が完全に一致する行は
-                        // 1件にまとめる(全期間をまたいで重複排除すると、たまたま値が
+                        // 完全重複と判明)。全列(Table.Distinct既定)で試したところ効果が
+                        // 無かったため、目に見えない列(隠れた計算列や行固有のID等)が
+                        // 存在し、それらが行ごとに微妙に異なっている可能性が高い。
+                        // そのため、実際の取引内容を表す業務列だけを明示的に指定して
+                        // 重複判定する(全期間をまたいで重複排除すると、たまたま値が
                         // 一致しただけの別々の取引まで消してしまう恐れがあるため、
                         // あくまで同じファイル内だけで行う)
-                        deduplicatedWithinFile = Table.Distinct(withMeta)
+                        DedupKeyCandidates = {
+                            "取引先", "病院名", "メーカー①", "症例", "特記事項",
+                            "伝票日付", "売上日", "OP日", "担当者",
+                            "製品番号", "ロット№", "製品名1", "製品名2",
+                            "売上数量", "価格1", "価格2", "掛率", "売上金額",
+                            "税抜売上計", "消費税", "税込売上計", "税抜仕入計"
+                        },
+                        ExistingDedupKeys = List.Intersect({Table.ColumnNames(withMeta), DedupKeyCandidates}),
+                        deduplicatedWithinFile = Table.Distinct(withMeta, ExistingDedupKeys)
                     in
                         deduplicatedWithinFile
         in
