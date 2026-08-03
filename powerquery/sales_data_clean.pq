@@ -480,6 +480,14 @@ let
             in
                 if trimmed = "" then null else trimmed,
 
+    // 取引先名から宛名の敬称「御中」を除去してから空白を正規化する(null安全)。
+    // 「御中」の有無だけで同じ会社が別の取引先として集計されてしまうのを防ぐ。
+    fnCleanDistributorText = (v as any) as nullable text =>
+        let
+            collapsed = fnCollapseWhitespace(v)
+        in
+            if collapsed = null then null else fnCollapseWhitespace(Text.Replace(collapsed, "御中", "")),
+
     // 取引先(代理店)マスタとの突き合わせ:
     //   ①伝票番号1(=貸出先コード。代理店コード2桁+病院コード3桁)が完全一致する行を優先
     //   ②見つからなければ、取引先の表記を正規化した上で代理店略称と一致するものを正式名称に変換
@@ -517,7 +525,7 @@ let
     WithTrimmedDistributorName = Table.AddColumn(
         ExpandedByDistCode,
         "取引先_マッチ用",
-        each fnCollapseWhitespace(Record.FieldOrDefault(_, "取引先", null)),
+        each fnCleanDistributorText(Record.FieldOrDefault(_, "取引先", null)),
         type nullable text
     ),
     MergedByDistAbbrev = Table.NestedJoin(
@@ -544,7 +552,7 @@ let
                 else if byAbbrev <> null then
                     byAbbrev
                 else
-                    fnCollapseWhitespace(Record.FieldOrDefault(_, "取引先", null)),
+                    fnCleanDistributorText(Record.FieldOrDefault(_, "取引先", null)),
         type nullable text
     ),
 
