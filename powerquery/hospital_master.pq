@@ -15,7 +15,10 @@
 
 let
     FilePath = "C:\Users\sfuru\OneDrive - M'z company\07. 売上関連\病院マスタ_更新済み.xlsx",
-    Source = Excel.Workbook(File.Contents(FilePath), true),
+    // useHeaders は null にしておく。true にすると Excel.Workbook がここで先に
+    // 1行目をヘッダー昇格してしまい、直後の Table.PromoteHeaders と二重昇格になって
+    // 本来のヘッダーの次の行(実データ1件目)が消えてしまう。
+    Source = Excel.Workbook(File.Contents(FilePath), null),
     Sheet1 = Source{[Item = "Sheet1", Kind = "Sheet"]}[Data],
     PromotedHeaders = Table.PromoteHeaders(Sheet1, [PromoteAllScalars = true]),
 
