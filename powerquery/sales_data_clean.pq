@@ -87,31 +87,44 @@ let
                         fnSafeText(Record.FieldOrDefault(r, "伝票番号1", null))
                             & "|" & fnSafeText(Record.FieldOrDefault(r, "伝票番号2", null)),
                     WithGroupKey = Table.AddColumn(tbl, "__取引キー", each fnGroupKey(_), type text),
-                    GroupsWithRealTotal = List.Distinct(
-                        Table.SelectRows(WithGroupKey, each not isBlank(Record.Field(_, "税抜売上計")))[__取引キー]
+                    hasCogs = List.Contains(colNames, "税抜仕入計"),
+
+                    // グループ(取引)ごとに1回だけ判定・修正する(行×グループ数の
+                    // 総当たりで判定すると、行数の多いファイルで極端に遅くなるため、
+                    // Table.Groupでグループ単位にまとめてから処理する)
+                    fnFixGroup = (grp as table) as table =>
+                        let
+                            hasRealTotal = List.AnyTrue(
+                                List.Transform(Table.Column(grp, "税抜売上計"), each not isBlank(_))
+                            ),
+                            withFlag = Table.AddColumn(
+                                grp,
+                                "__明細行",
+                                each hasRealTotal and isBlank(Record.Field(_, "税抜売上計")),
+                                type logical
+                            ),
+                            withCogsFixed =
+                                if hasCogs then
+                                    let
+                                        added = Table.AddColumn(
+                                            withFlag, "税抜仕入計__調整済",
+                                            each if Record.Field(_, "__明細行") then null else Record.Field(_, "税抜仕入計")
+                                        ),
+                                        removedOld = Table.RemoveColumns(added, {"税抜仕入計"}),
+                                        renamedNew = Table.RenameColumns(removedOld, {{"税抜仕入計__調整済", "税抜仕入計"}})
+                                    in
+                                        renamedNew
+                                else
+                                    withFlag
+                        in
+                            withCogsFixed,
+
+                    Grouped = Table.Group(
+                        WithGroupKey, {"__取引キー"},
+                        {{"__グループ", each fnFixGroup(_), type table}}
                     ),
-                    WithFlag = Table.AddColumn(
-                        WithGroupKey,
-                        "__明細行",
-                        each
-                            isBlank(Record.Field(_, "税抜売上計"))
-                            and List.Contains(GroupsWithRealTotal, Record.Field(_, "__取引キー")),
-                        type logical
-                    ),
-                    WithCogsFixed =
-                        if List.Contains(colNames, "税抜仕入計") then
-                            let
-                                added = Table.AddColumn(
-                                    WithFlag, "税抜仕入計__調整済",
-                                    each if Record.Field(_, "__明細行") then null else Record.Field(_, "税抜仕入計")
-                                ),
-                                removedOld = Table.RemoveColumns(added, {"税抜仕入計"}),
-                                renamedNew = Table.RenameColumns(removedOld, {{"税抜仕入計__調整済", "税抜仕入計"}})
-                            in
-                                renamedNew
-                        else
-                            WithFlag,
-                    removedKey = Table.RemoveColumns(WithCogsFixed, {"__取引キー"})
+                    Recombined = Table.Combine(Grouped[__グループ]),
+                    removedKey = Table.RemoveColumns(Recombined, {"__取引キー"})
                 in
                     removedKey,
 
