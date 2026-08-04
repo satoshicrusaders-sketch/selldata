@@ -61,73 +61,6 @@ let
         {"ロットNo№", "ロット№"}
     },
 
-    // 一部の期(例:2022年3月)は、1つの取引(伝票番号1+伝票番号2)が複数の明細行に
-    // 分かれて記録されており、「税抜仕入計」だけが全ての明細行に同じ値でコピーされ、
-    // 「税抜売上計」は最後の合計行にしか入らず他の行は空欄、という構造になっている。
-    // このまま列を単純合計すると、税抜仕入計だけ明細行数分だけ何倍にも過大集計されて
-    // しまう(2022.03の実データで確認: 重複行とは別に約9.8倍の過大計上があった)。
-    // 伝票番号1+伝票番号2でグループ化し、グループ内に「税抜売上計が入っている合計行」が
-    // 存在する場合は、それ以外の明細行の税抜仕入計をnullにする。あわせて「明細行かどうか」の
-    // フラグ列を残しておき、後段のWithRevenueFallback(税抜売上計が空欄の行を売上金額で
-    // 代用する処理)が同じ理由で明細行にまで誤って適用されないようにする。
-    // (伝票番号列が無い期はこの処理自体をスキップし、従来通りの挙動のままにする)
-    fnMarkLineItems = (tbl as table) as table =>
-        let
-            colNames = Table.ColumnNames(tbl),
-            hasGroupCols = List.Contains(colNames, "伝票番号1") and List.Contains(colNames, "伝票番号2"),
-            hasExTax = List.Contains(colNames, "税抜売上計")
-        in
-            if not hasGroupCols or not hasExTax then
-                Table.AddColumn(tbl, "__明細行", each false, type logical)
-            else
-                let
-                    isBlank = (v as any) as logical => v = null or v = "",
-                    fnSafeText = (v as any) as text => if v = null then "" else Text.From(v),
-                    fnGroupKey = (r as record) as text =>
-                        fnSafeText(Record.FieldOrDefault(r, "伝票番号1", null))
-                            & "|" & fnSafeText(Record.FieldOrDefault(r, "伝票番号2", null)),
-                    WithGroupKey = Table.AddColumn(tbl, "__取引キー", each fnGroupKey(_), type text),
-                    hasCogs = List.Contains(colNames, "税抜仕入計"),
-
-                    // グループ(取引)ごとに1回だけ判定・修正する(行×グループ数の
-                    // 総当たりで判定すると、行数の多いファイルで極端に遅くなるため、
-                    // Table.Groupでグループ単位にまとめてから処理する)
-                    fnFixGroup = (grp as table) as table =>
-                        let
-                            hasRealTotal = List.AnyTrue(
-                                List.Transform(Table.Column(grp, "税抜売上計"), each not isBlank(_))
-                            ),
-                            withFlag = Table.AddColumn(
-                                grp,
-                                "__明細行",
-                                each hasRealTotal and isBlank(Record.Field(_, "税抜売上計")),
-                                type logical
-                            ),
-                            withCogsFixed =
-                                if hasCogs then
-                                    let
-                                        added = Table.AddColumn(
-                                            withFlag, "税抜仕入計__調整済",
-                                            each if Record.Field(_, "__明細行") then null else Record.Field(_, "税抜仕入計")
-                                        ),
-                                        removedOld = Table.RemoveColumns(added, {"税抜仕入計"}),
-                                        renamedNew = Table.RenameColumns(removedOld, {{"税抜仕入計__調整済", "税抜仕入計"}})
-                                    in
-                                        renamedNew
-                                else
-                                    withFlag
-                        in
-                            withCogsFixed,
-
-                    Grouped = Table.Group(
-                        WithGroupKey, {"__取引キー"},
-                        {{"__グループ", each fnFixGroup(_), type table}}
-                    ),
-                    Recombined = Table.Combine(Grouped[__グループ]),
-                    removedKey = Table.RemoveColumns(Recombined, {"__取引キー"})
-                in
-                    removedKey,
-
     // 1枚のシート/テーブル(生データ)を処理する。「取引先」ヘッダーが
     // 見つからない場合は null を返す(そのシートは対象外とみなす)。
     //
@@ -200,12 +133,8 @@ let
                                 )
                         ),
 
-                        // 明細行/合計行の構造を検出し、税抜仕入計の多重集計を防ぐ
-                        // (詳細は fnMarkLineItems のコメント参照)
-                        markedLineItems = fnMarkLineItems(noFooterTotal),
-
                         withMeta = Table.AddColumn(
-                            Table.AddColumn(markedLineItems, "年月", each yearMonth, type text),
+                            Table.AddColumn(noFooterTotal, "年月", each yearMonth, type text),
                             "ソースファイル",
                             each fileName,
                             type text
@@ -285,6 +214,78 @@ let
     // 期によって列構成が違っても Table.Combine が自動で和集合を取り、欠落列をnull補完する
     Combined = Table.Combine(WithParsedTable[ParsedTable]),
 
+    // 一部の期(例:2022年3月)は、1つの取引(伝票番号1+伝票番号2)が複数の明細行に
+    // 分かれて記録されており、「税抜仕入計」だけが全ての明細行に同じ値でコピーされ、
+    // 「税抜売上計」は最後の合計行にしか入らず他の行は空欄、という構造になっている。
+    // このまま列を単純合計すると、税抜仕入計だけ明細行数分だけ何倍にも過大集計されて
+    // しまう(2022.03の実データで確認: 重複行とは別に約9.8倍の過大計上があった)。
+    // 伝票番号1+伝票番号2(+月をまたいだ番号の重複を避けるためソースファイルも)で
+    // グループ化し、グループ内に「税抜売上計が入っている合計行」が存在する場合は、
+    // それ以外の明細行の税抜仕入計をnullにする。あわせて「明細行かどうか」のフラグ列を
+    // 残しておき、後段のWithRevenueFallback(税抜売上計が空欄の行を売上金額で代用する
+    // 処理)が同じ理由で明細行にまで誤って適用されないようにする。
+    // (ファイルごと・候補シートごとに実行すると計算量が跳ね上がり更新が終わらなくなった
+    // ため、全ファイルを結合した後にこの1回だけ実行する)
+    fnMarkLineItems = (tbl as table) as table =>
+        let
+            colNames = Table.ColumnNames(tbl),
+            hasGroupCols =
+                List.Contains(colNames, "伝票番号1")
+                and List.Contains(colNames, "伝票番号2")
+                and List.Contains(colNames, "ソースファイル"),
+            hasExTax = List.Contains(colNames, "税抜売上計")
+        in
+            if not hasGroupCols or not hasExTax then
+                Table.AddColumn(tbl, "__明細行", each false, type logical)
+            else
+                let
+                    isBlank = (v as any) as logical => v = null or v = "",
+                    fnSafeText = (v as any) as text => if v = null then "" else Text.From(v),
+                    fnGroupKey = (r as record) as text =>
+                        fnSafeText(Record.Field(r, "ソースファイル"))
+                            & "|" & fnSafeText(Record.FieldOrDefault(r, "伝票番号1", null))
+                            & "|" & fnSafeText(Record.FieldOrDefault(r, "伝票番号2", null)),
+                    WithGroupKey = Table.AddColumn(tbl, "__取引キー", each fnGroupKey(_), type text),
+                    hasCogs = List.Contains(colNames, "税抜仕入計"),
+
+                    fnFixGroup = (grp as table) as table =>
+                        let
+                            hasRealTotal = List.AnyTrue(
+                                List.Transform(Table.Column(grp, "税抜売上計"), each not isBlank(_))
+                            ),
+                            withFlag = Table.AddColumn(
+                                grp,
+                                "__明細行",
+                                each hasRealTotal and isBlank(Record.Field(_, "税抜売上計")),
+                                type logical
+                            ),
+                            withCogsFixed =
+                                if hasCogs then
+                                    let
+                                        added = Table.AddColumn(
+                                            withFlag, "税抜仕入計__調整済",
+                                            each if Record.Field(_, "__明細行") then null else Record.Field(_, "税抜仕入計")
+                                        ),
+                                        removedOld = Table.RemoveColumns(added, {"税抜仕入計"}),
+                                        renamedNew = Table.RenameColumns(removedOld, {{"税抜仕入計__調整済", "税抜仕入計"}})
+                                    in
+                                        renamedNew
+                                else
+                                    withFlag
+                        in
+                            withCogsFixed,
+
+                    Grouped = Table.Group(
+                        WithGroupKey, {"__取引キー"},
+                        {{"__グループ", each fnFixGroup(_), type table}}
+                    ),
+                    Recombined = Table.Combine(Grouped[__グループ]),
+                    removedKey = Table.RemoveColumns(Recombined, {"__取引キー"})
+                in
+                    removedKey,
+
+    MarkedLineItems = fnMarkLineItems(Combined),
+
     // 金額・数量列にも、注記などが紛れ込んで数値変換できないセルがまれにある。
     // 日付と同様、変換に失敗した値は問答無用でnullにする(型変換エラーで行ごと壊れるのを防ぐ)。
     fnCleanNumericValue = (v as any) as nullable number =>
@@ -298,9 +299,9 @@ let
         "売上数量", "価格1", "価格2", "掛率", "売上金額",
         "税抜売上計", "消費税", "税込売上計", "税抜仕入計"
     },
-    ExistingNumericCols = List.Intersect({Table.ColumnNames(Combined), NumericColumnCandidates}),
+    ExistingNumericCols = List.Intersect({Table.ColumnNames(MarkedLineItems), NumericColumnCandidates}),
     CleanedNumericValues = Table.TransformColumns(
-        Combined,
+        MarkedLineItems,
         List.Transform(ExistingNumericCols, each {_, fnCleanNumericValue})
     ),
     TypedNumeric = Table.TransformColumnTypes(
