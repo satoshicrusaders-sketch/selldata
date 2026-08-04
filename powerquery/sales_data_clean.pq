@@ -61,6 +61,60 @@ let
         {"ロットNo№", "ロット№"}
     },
 
+    // 一部の期(例:2022年3月)は、1つの取引(伝票番号1+伝票番号2)が複数の明細行に
+    // 分かれて記録されており、「税抜仕入計」だけが全ての明細行に同じ値でコピーされ、
+    // 「税抜売上計」は最後の合計行にしか入らず他の行は空欄、という構造になっている。
+    // このまま列を単純合計すると、税抜仕入計だけ明細行数分だけ何倍にも過大集計されて
+    // しまう(2022.03の実データで確認: 重複行とは別に約9.8倍の過大計上があった)。
+    // 伝票番号1+伝票番号2でグループ化し、グループ内に「税抜売上計が入っている合計行」が
+    // 存在する場合は、それ以外の明細行の税抜仕入計をnullにする。あわせて「明細行かどうか」の
+    // フラグ列を残しておき、後段のWithRevenueFallback(税抜売上計が空欄の行を売上金額で
+    // 代用する処理)が同じ理由で明細行にまで誤って適用されないようにする。
+    // (伝票番号列が無い期はこの処理自体をスキップし、従来通りの挙動のままにする)
+    fnMarkLineItems = (tbl as table) as table =>
+        let
+            colNames = Table.ColumnNames(tbl),
+            hasGroupCols = List.Contains(colNames, "伝票番号1") and List.Contains(colNames, "伝票番号2"),
+            hasExTax = List.Contains(colNames, "税抜売上計")
+        in
+            if not hasGroupCols or not hasExTax then
+                Table.AddColumn(tbl, "__明細行", each false, type logical)
+            else
+                let
+                    isBlank = (v as any) as logical => v = null or v = "",
+                    fnSafeText = (v as any) as text => if v = null then "" else Text.From(v),
+                    fnGroupKey = (r as record) as text =>
+                        fnSafeText(Record.FieldOrDefault(r, "伝票番号1", null))
+                            & "|" & fnSafeText(Record.FieldOrDefault(r, "伝票番号2", null)),
+                    WithGroupKey = Table.AddColumn(tbl, "__取引キー", each fnGroupKey(_), type text),
+                    GroupsWithRealTotal = List.Distinct(
+                        Table.SelectRows(WithGroupKey, each not isBlank(Record.Field(_, "税抜売上計")))[__取引キー]
+                    ),
+                    WithFlag = Table.AddColumn(
+                        WithGroupKey,
+                        "__明細行",
+                        each
+                            isBlank(Record.Field(_, "税抜売上計"))
+                            and List.Contains(GroupsWithRealTotal, Record.Field(_, "__取引キー")),
+                        type logical
+                    ),
+                    WithCogsFixed =
+                        if List.Contains(colNames, "税抜仕入計") then
+                            let
+                                added = Table.AddColumn(
+                                    WithFlag, "税抜仕入計__調整済",
+                                    each if Record.Field(_, "__明細行") then null else Record.Field(_, "税抜仕入計")
+                                ),
+                                removedOld = Table.RemoveColumns(added, {"税抜仕入計"}),
+                                renamedNew = Table.RenameColumns(removedOld, {{"税抜仕入計__調整済", "税抜仕入計"}})
+                            in
+                                renamedNew
+                        else
+                            WithFlag,
+                    removedKey = Table.RemoveColumns(WithCogsFixed, {"__取引キー"})
+                in
+                    removedKey,
+
     // 1枚のシート/テーブル(生データ)を処理する。「取引先」ヘッダーが
     // 見つからない場合は null を返す(そのシートは対象外とみなす)。
     //
@@ -133,33 +187,18 @@ let
                                 )
                         ),
 
+                        // 明細行/合計行の構造を検出し、税抜仕入計の多重集計を防ぐ
+                        // (詳細は fnMarkLineItems のコメント参照)
+                        markedLineItems = fnMarkLineItems(noFooterTotal),
+
                         withMeta = Table.AddColumn(
-                            Table.AddColumn(noFooterTotal, "年月", each yearMonth, type text),
+                            Table.AddColumn(markedLineItems, "年月", each yearMonth, type text),
                             "ソースファイル",
                             each fileName,
                             type text
-                        ),
-
-                        // 元のExcelファイル自体に、コピー&ペースト等で全く同じ内容の行が
-                        // 複数回入っていることがある(実際に2022.03で1874行中724行が
-                        // 完全重複と判明)。全列(Table.Distinct既定)で試したところ効果が
-                        // 無かったため、目に見えない列(隠れた計算列や行固有のID等)が
-                        // 存在し、それらが行ごとに微妙に異なっている可能性が高い。
-                        // そのため、実際の取引内容を表す業務列だけを明示的に指定して
-                        // 重複判定する(全期間をまたいで重複排除すると、たまたま値が
-                        // 一致しただけの別々の取引まで消してしまう恐れがあるため、
-                        // あくまで同じファイル内だけで行う)
-                        DedupKeyCandidates = {
-                            "取引先", "病院名", "メーカー①", "症例", "特記事項",
-                            "伝票日付", "売上日", "OP日", "担当者",
-                            "製品番号", "ロット№", "製品名1", "製品名2",
-                            "売上数量", "価格1", "価格2", "掛率", "売上金額",
-                            "税抜売上計", "消費税", "税込売上計", "税抜仕入計"
-                        },
-                        ExistingDedupKeys = List.Intersect({Table.ColumnNames(withMeta), DedupKeyCandidates}),
-                        deduplicatedWithinFile = Table.Distinct(withMeta, ExistingDedupKeys)
+                        )
                     in
-                        deduplicatedWithinFile
+                        withMeta
         in
             result,
 
@@ -265,13 +304,17 @@ let
     WithRevenueFallback =
         if List.Contains(Table.ColumnNames(TypedNumeric), "税抜売上計") and List.Contains(Table.ColumnNames(TypedNumeric), "売上金額") then
             let
+                // 明細行(fnMarkLineItemsで検出済み)は、同じ取引の別の行に本物の
+                // 合計行が存在するので、売上金額での代用は行わない
+                // (行わないとその取引の売上が明細行数分だけ二重・多重計上されてしまう)
                 fixedExTax = Table.AddColumn(
                     TypedNumeric,
                     "税抜売上計_補完",
                     each
                         let
                             exTax = Record.FieldOrDefault(_, "税抜売上計", null),
-                            fallback = Record.FieldOrDefault(_, "売上金額", null)
+                            isLineItem = Record.FieldOrDefault(_, "__明細行", false),
+                            fallback = if isLineItem then null else Record.FieldOrDefault(_, "売上金額", null)
                         in
                             if exTax <> null then exTax else fallback,
                     type nullable number
@@ -305,6 +348,13 @@ let
         else
             TypedNumeric,
 
+    // fnMarkLineItemsが付けた作業用フラグ列は、ここまでの計算で役目を終えたので
+    // 最終的なテーブルには残さない
+    WithoutHelperCols = Table.RemoveColumns(
+        WithRevenueFallback,
+        List.Intersect({Table.ColumnNames(WithRevenueFallback), {"__明細行"}})
+    ),
+
     // OP日・伝票日付・売上日は、手術がない明細行(運送料・器械貸出料など)では
     // 「1/0」のようなダミー値や、日付として解釈できない文字列が入っていることがある。
     // 個別のパターンを想定して除外するのではなく、実際に日付へ変換を試みて、
@@ -330,9 +380,9 @@ let
 
     // 日付列も、存在するものだけ日付化
     DateColumnCandidates = {"売上日", "OP日", "伝票日付"},
-    ExistingDateCols = List.Intersect({Table.ColumnNames(WithRevenueFallback), DateColumnCandidates}),
+    ExistingDateCols = List.Intersect({Table.ColumnNames(WithoutHelperCols), DateColumnCandidates}),
     CleanedDateValues = Table.TransformColumns(
-        WithRevenueFallback,
+        WithoutHelperCols,
         List.Transform(ExistingDateCols, each {_, fnCleanDateValue})
     ),
     TypedDates = Table.TransformColumnTypes(
