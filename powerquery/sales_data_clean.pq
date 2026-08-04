@@ -687,6 +687,14 @@ let
     FinalWithMaker = Table.TransformColumns(
         FinalWithDistributor,
         List.Transform(ExistingMakerCols, each {_, fnNormalizeMakerName})
-    )
+    ),
+
+    // 担当者名も全角/半角スペースの混在(例:「村野 博明」と「村野　博明」)で
+    // 同一人物が別人扱いされ、グラフの凡例などで重複していたため正規化する
+    FinalWithStaff =
+        if List.Contains(Table.ColumnNames(FinalWithMaker), "担当者") then
+            Table.TransformColumns(FinalWithMaker, {"担当者", fnCollapseWhitespace})
+        else
+            FinalWithMaker
 in
-    FinalWithMaker
+    FinalWithStaff
