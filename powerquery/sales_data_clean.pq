@@ -493,17 +493,21 @@ let
         type nullable text
     ),
 
-    // 病院名の表記ゆれ(前後の空白等)を吸収するための照合用トリム列
+    // 病院名の表記ゆれ(前後・連続する全角/半角スペース等)を吸収するための照合用列。
+    // Text.Trimだけだと全角スペースが除去できず、それが原因で同じ病院が別名として
+    // 重複することがあったため、取引先と同じfnCollapseWhitespaceを使う
+    // (fnCollapseWhitespaceはこのクエリ内の後方で定義しているが、M言語は定義順に
+    // 依存しないためこの位置から参照して問題ない)
     WithTrimmedHospitalName = Table.AddColumn(
         WithHospitalCode,
         "病院名_マッチ用",
-        each Text.Trim(Text.From(Record.FieldOrDefault(_, "病院名", ""))),
-        type text
+        each fnCollapseWhitespace(Record.FieldOrDefault(_, "病院名", null)),
+        type nullable text
     ),
 
     // 病院マスタ(同じPower BIファイル内の別クエリ)を参照し、
     // ①病院コード一致 → ②(コードで見つからない場合のみ)病院名一致 の優先順で
-    // 住所・電話番号・URLを解決して直接マージする
+    // 住所・電話番号・URL・正式名称を解決して直接マージする
     HospitalMaster = 病院マスタ,
 
     MergedByCode = Table.NestedJoin(
@@ -513,8 +517,8 @@ let
     ),
     ExpandedByCode = Table.ExpandTableColumn(
         MergedByCode, "マスタ_コード一致",
-        {"住所", "電話番号", "URL"},
-        {"住所_コード", "電話番号_コード", "URL_コード"}
+        {"名称", "住所", "電話番号", "URL"},
+        {"名称_コード", "住所_コード", "電話番号_コード", "URL_コード"}
     ),
 
     MergedByName = Table.NestedJoin(
@@ -524,31 +528,49 @@ let
     ),
     ExpandedByName = Table.ExpandTableColumn(
         MergedByName, "マスタ_名称一致",
-        {"住所", "電話番号", "URL"},
-        {"住所_名称", "電話番号_名称", "URL_名称"}
+        {"名称", "住所", "電話番号", "URL"},
+        {"名称_名称", "住所_名称", "電話番号_名称", "URL_名称"}
     ),
 
     fnFirstNonNull = (a as any, b as any) as any => if a <> null then a else b,
     WithResolvedMaster = Table.AddColumn(
         Table.AddColumn(
             Table.AddColumn(
-                ExpandedByName,
-                "住所",
-                each fnFirstNonNull(Record.FieldOrDefault(_, "住所_コード", null), Record.FieldOrDefault(_, "住所_名称", null)),
+                Table.AddColumn(
+                    ExpandedByName,
+                    "住所",
+                    each fnFirstNonNull(Record.FieldOrDefault(_, "住所_コード", null), Record.FieldOrDefault(_, "住所_名称", null)),
+                    type nullable text
+                ),
+                "電話番号",
+                each fnFirstNonNull(Record.FieldOrDefault(_, "電話番号_コード", null), Record.FieldOrDefault(_, "電話番号_名称", null)),
                 type nullable text
             ),
-            "電話番号",
-            each fnFirstNonNull(Record.FieldOrDefault(_, "電話番号_コード", null), Record.FieldOrDefault(_, "電話番号_名称", null)),
+            "URL",
+            each fnFirstNonNull(Record.FieldOrDefault(_, "URL_コード", null), Record.FieldOrDefault(_, "URL_名称", null)),
             type nullable text
         ),
-        "URL",
-        each fnFirstNonNull(Record.FieldOrDefault(_, "URL_コード", null), Record.FieldOrDefault(_, "URL_名称", null)),
+        // 病院名の統一名: ①コード一致でマスタの正式名称 → ②名称一致でマスタの名称 →
+        // ③どちらも見つからない場合は元の病院名をスペース正規化しただけのもの、の優先順
+        "病院名_統一",
+        each
+            fnFirstNonNull(
+                Record.FieldOrDefault(_, "名称_コード", null),
+                fnFirstNonNull(
+                    Record.FieldOrDefault(_, "名称_名称", null),
+                    fnCollapseWhitespace(Record.FieldOrDefault(_, "病院名", null))
+                )
+            ),
         type nullable text
     ),
 
     FinalCleaned = Table.RemoveColumns(
         WithResolvedMaster,
-        {"病院名_マッチ用", "住所_コード", "電話番号_コード", "URL_コード", "住所_名称", "電話番号_名称", "URL_名称"}
+        {
+            "病院名_マッチ用",
+            "名称_コード", "住所_コード", "電話番号_コード", "URL_コード",
+            "名称_名称", "住所_名称", "電話番号_名称", "URL_名称"
+        }
     ),
 
     // 前後・連続する全角/半角スペースを1つの半角スペースに正規化する(null安全)
