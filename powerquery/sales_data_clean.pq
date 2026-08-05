@@ -738,6 +738,67 @@ let
         else
             FinalWithMaker,
 
+    // メーカー①の略称・略号統一マップ(症例単位の自由記述で使われる略称/略号を
+    // 製品マスタの正式表記に統一する)。大文字/小文字は区別しない。
+    // 片仮名/英語表記が両方存在するもの(ENOVIS/エノヴィス等)は、製品マスタの
+    // 表記(基本的に英語)に合わせて統一する。製品マスタに無いブランド(マティス等)は
+    // 元の表記のまま残す
+    MakerAbbrevMap = {
+        {"A", "ADLER"},
+        {"N", "ナカシマ"},
+        {"Ⓝ", "ナカシマ"},
+        {"MP", "マイクロポート"},
+        {"Ⓜ", "マイクロポート"},
+        {"JOY", "ジョイアップ"},
+        {"JYOI", "ジョイアップ"},
+        {"JOYUP", "ジョイアップ"},
+        {"E", "ENOVIS"},
+        {"ENO", "ENOVIS"},
+        {"エノヴィス", "ENOVIS"},
+        {"U", "United"},
+        {"UNITED", "United"},
+        {"ユナイテッド", "United"},
+        {"MJ", "Medacta"},
+        {"メダクタ", "Medacta"},
+        {"コリン", "Corin"},
+        {"ホロナビ", "HoloNavi"},
+        {"MATHYS", "マティス"}
+    },
+
+    // 「N器械」「Nキカイ」のように、略称の後ろに貸出器械を表す「器械」「キカイ」が
+    // 付いていることがあるため、略称の判定前に取り除く
+    fnStripInstrumentSuffix = (v as text) as text =>
+        let
+            noKanji = if Text.EndsWith(v, "器械") then Text.Start(v, Text.Length(v) - 2) else v,
+            noKana = if Text.EndsWith(noKanji, "キカイ") then Text.Start(noKanji, Text.Length(noKanji) - 3) else noKanji
+        in
+            Text.Trim(noKana),
+
+    fnResolveMakerToken = (token as text) as text =>
+        let
+            stripped = fnStripInstrumentSuffix(Text.Trim(token)),
+            upperStripped = Text.Upper(stripped),
+            matches = List.Select(MakerAbbrevMap, each Text.Upper(_{0}) = upperStripped)
+        in
+            if List.IsEmpty(matches) then stripped else matches{0}{1},
+
+    // メーカー①は「+」(全角＋も含む)区切りで複数メーカーが併記されることがあるため、
+    // トークンごとに略称を正式名称へ解決してから結合し直す。単独表記(トークン1つ)にも
+    // そのまま使える
+    fnNormalizeMakerFallback = (v as any) as nullable text =>
+        if v = null then
+            null
+        else
+            let
+                collapsed = fnCollapseWhitespace(v),
+                normalizedPlus = if collapsed = null then null else Text.Replace(collapsed, "＋", "+"),
+                tokens = if normalizedPlus = null then {} else Text.Split(normalizedPlus, "+"),
+                resolvedTokens = List.Transform(tokens, fnResolveMakerToken),
+                dedupedTokens = List.Distinct(resolvedTokens),
+                rejoined = Text.Combine(dedupedTokens, "+")
+            in
+                if rejoined = "" then null else rejoined,
+
     // 製品マスタ(価格表、同じPower BIファイル内の別クエリ)を参照し、
     // 「製品番号」から正しいメーカーを1件だけ取得する。
     // メーカー①は症例(取引)単位の自由記述で「ADLER+MP」のような複合表記に
@@ -778,7 +839,7 @@ let
                             if fromMaster <> null then
                                 fnNormalizeMakerName(fromMaster)
                             else
-                                Record.FieldOrDefault(_, "メーカー①", null),
+                                fnNormalizeMakerFallback(Record.FieldOrDefault(_, "メーカー①", null)),
                     type nullable text
                 )
             in
