@@ -711,11 +711,27 @@ let
         List.Transform(ExistingMakerCols, each {_, fnNormalizeMakerName})
     ),
 
-    // 担当者名も全角/半角スペースの混在(例:「村野 博明」と「村野　博明」)で
-    // 同一人物が別人扱いされ、グラフの凡例などで重複していたため正規化する
+    // 異体字統一マップ(氏名で人によって旧字体/異体字が使われることがある)。
+    // 例:「髙村」と「高村」は同一人物だが文字が違うため別人として集計されていた。
+    // 他にも見つかり次第ここに追加していく
+    KanjiVariantMap = {
+        {"髙", "高"}
+    },
+    fnNormalizeStaffName = (v as any) as nullable text =>
+        if v = null then
+            null
+        else
+            let
+                replaced = List.Accumulate(KanjiVariantMap, Text.From(v), (state, pair) => Text.Replace(state, pair{0}, pair{1}))
+            in
+                fnCollapseWhitespace(replaced),
+
+    // 担当者名も全角/半角スペースの混在(例:「村野 博明」と「村野　博明」)や
+    // 異体字(例:「髙村」と「高村」)で同一人物が別人扱いされ、グラフの凡例などで
+    // 重複していたため正規化する
     FinalWithStaff =
         if List.Contains(Table.ColumnNames(FinalWithMaker), "担当者") then
-            Table.TransformColumns(FinalWithMaker, {"担当者", fnCollapseWhitespace})
+            Table.TransformColumns(FinalWithMaker, {"担当者", fnNormalizeStaffName})
         else
             FinalWithMaker
 in
