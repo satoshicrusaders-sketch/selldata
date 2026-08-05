@@ -5,11 +5,12 @@
 //   07. 売上関連 / 月次一覧 - コピー / [8期|9期|10期|11期|12期|13期] / YYYY.MM.xlsx (or YYYYMM.xlsx)
 //
 // 前提:
-//   同じPower BIファイル内に、以下2つのクエリがすでに作成済みであること
+//   同じPower BIファイル内に、以下3つのクエリがすでに作成済みであること
 //   (このスクリプトはクエリ名で直接参照するため、先にこれらを作成・実行してから
 //    このクエリを作成すること)。
 //     - 「病院マスタ」  (hospital_master.pq)
 //     - 「取引先マスタ」(distributor_master.pq)
+//     - 「製品マスタ」  (product_master.pq)
 //
 // 使い方:
 //   1. Power BI Desktop > Power Query エディター > 新しいクエリ > 空のクエリ
@@ -30,7 +31,9 @@
 //   - 伝票番号1(=貸出先コード)→(だめなら)取引先名/略称一致の優先順で、
 //     取引先マスタから正式な取引先名称を「取引先_統一」列として解決
 //   - メーカー①②③の半角カナを全角カナに正規化し、前後・連続スペースを統一
-//     (メーカー専用マスタは無いため機械的な正規化のみ)
+//   - 製品番号→製品マスタでメーカーを1件取得し(一致しなければメーカー①で代用)、
+//     「メーカー_統一」列として解決(メーカー①は症例単位の自由記述で「ADLER+MP」
+//     のような複合表記になるため、製品番号ベースの明細行単位の正確な紐づけに切り替え)
 //
 // 注意:
 //   - 期によって列構成が大きく異なる(例: 11-12期は数量/単価/担当者列が存在しない)ため、
@@ -733,6 +736,54 @@ let
         if List.Contains(Table.ColumnNames(FinalWithMaker), "担当者") then
             Table.TransformColumns(FinalWithMaker, {"担当者", fnNormalizeStaffName})
         else
-            FinalWithMaker
+            FinalWithMaker,
+
+    // 製品マスタ(価格表、同じPower BIファイル内の別クエリ)を参照し、
+    // 「製品番号」から正しいメーカーを1件だけ取得する。
+    // メーカー①は症例(取引)単位の自由記述で「ADLER+MP」のような複合表記に
+    // なってしまうため、製品番号ベースの明細行単位の正確な紐づけに切り替える。
+    // ProductMasterは製品番号で重複排除済みなので、この結合で行が増殖することはない
+    ProductMaster = Table.Distinct(製品マスタ, {"製品番号"}),
+
+    FinalWithProductMaker =
+        if List.Contains(Table.ColumnNames(FinalWithStaff), "製品番号") then
+            let
+                WithProductCode = Table.AddColumn(
+                    FinalWithStaff,
+                    "製品番号_テキスト",
+                    each fnCollapseWhitespace(Record.FieldOrDefault(_, "製品番号", null)),
+                    type nullable text
+                ),
+                MergedByProduct = Table.NestedJoin(
+                    WithProductCode, {"製品番号_テキスト"},
+                    ProductMaster, {"製品番号"},
+                    "マスタ_製品一致", JoinKind.LeftOuter
+                ),
+                ExpandedByProduct = Table.ExpandTableColumn(
+                    MergedByProduct, "マスタ_製品一致",
+                    {"メーカー"},
+                    {"メーカー_マスタ"}
+                ),
+
+                // ①製品マスタで製品番号が一致すればそのメーカー(正規化済み) →
+                // ②一致しない場合(役務行・貸出料・マスタ未登録の新製品等)は
+                // 既存のメーカー①(症例単位の自由記述)をフォールバックとして使う
+                WithUnifiedMaker = Table.AddColumn(
+                    ExpandedByProduct,
+                    "メーカー_統一",
+                    each
+                        let
+                            fromMaster = Record.FieldOrDefault(_, "メーカー_マスタ", null)
+                        in
+                            if fromMaster <> null then
+                                fnNormalizeMakerName(fromMaster)
+                            else
+                                Record.FieldOrDefault(_, "メーカー①", null),
+                    type nullable text
+                )
+            in
+                Table.RemoveColumns(WithUnifiedMaker, {"製品番号_テキスト", "メーカー_マスタ"})
+        else
+            FinalWithStaff
 in
-    FinalWithStaff
+    FinalWithProductMaker
