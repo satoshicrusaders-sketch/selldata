@@ -759,10 +759,14 @@ let
         {"UNITED", "United"},
         {"ユナイテッド", "United"},
         {"MJ", "Medacta"},
+        {"IC", "Medacta"},
         {"メダクタ", "Medacta"},
         {"コリン", "Corin"},
         {"ホロナビ", "HoloNavi"},
-        {"MATHYS", "マティス"}
+        {"MATHYS", "マティス"},
+        {"M'Z所有", "MZC"},
+        {"自社", "MZC"},
+        {"自社保有", "MZC"}
     },
 
     // 「N器械」「Nキカイ」のように、略称の後ろに貸出器械を表す「器械」「キカイ」が
@@ -848,7 +852,9 @@ let
                             fromMaster = Record.FieldOrDefault(_, "メーカー_マスタ", null)
                         in
                             if fromMaster <> null then
-                                fnNormalizeMakerName(fromMaster)
+                                // マスタ側の値(例:「ic」)にも略称統一・非メーカー値除外を
+                                // 同じように適用する
+                                fnNormalizeMakerFallback(fnNormalizeMakerName(fromMaster))
                             else
                                 fnNormalizeMakerFallback(Record.FieldOrDefault(_, "メーカー①", null)),
                     type nullable text
