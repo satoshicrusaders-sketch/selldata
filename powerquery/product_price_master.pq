@@ -285,6 +285,24 @@ let
         TrimmedKeys, {"メーカー", "製品番号"},
         {{"最新行", each Table.LastN(Table.Sort(_, {{"取得日", Order.Ascending}}), 1), type table}}
     ),
-    Latest = Table.Combine(Grouped[最新行])
+    Latest = Table.Combine(Grouped[最新行]),
+
+    // 定価・償還価格はExcel側の書式次第でテキストとして読み込まれることがあり、
+    // そのままだとPower BI側で桁区切り(カンマ)表示ができない。
+    // 変換に失敗した値(空欄・記号混入等)はnullにして行ごと壊れるのを防ぐ
+    fnCleanNumericValue = (v as any) as nullable number =>
+        if v = null then
+            null
+        else
+            try Number.From(v) otherwise null,
+    NumericColumnCandidates = {"定価", "償還価格_現在"},
+    ExistingNumericCols = List.Intersect({Table.ColumnNames(Latest), NumericColumnCandidates}),
+    TypedNumeric = Table.TransformColumnTypes(
+        Table.TransformColumns(
+            Latest,
+            List.Transform(ExistingNumericCols, each {_, fnCleanNumericValue})
+        ),
+        List.Transform(ExistingNumericCols, each {_, type number})
+    )
 in
-    Latest
+    TypedNumeric
