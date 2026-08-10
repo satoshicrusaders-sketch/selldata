@@ -279,9 +279,11 @@ let
     // 同じメーカー×製品番号が複数ファイル(=複数取得日)に重複して存在する
     // 場合、取得日が一番新しいものだけを残す(改定のたびにファイルが
     // 増えていく運用のため、最新版だけが「製品価格マスタ」の1行になる)
+    // Table.Last(...)はレコード型(1行)を返してしまいTable.Combineと組み合わせられないため、
+    // テーブル型のまま「末尾1行」を取れるTable.LastNを使う
     Grouped = Table.Group(
         TrimmedKeys, {"メーカー", "製品番号"},
-        {{"最新行", each Table.Last(Table.Sort(_, {{"取得日", Order.Ascending}})), type table}}
+        {{"最新行", each Table.LastN(Table.Sort(_, {{"取得日", Order.Ascending}}), 1), type table}}
     ),
     Latest = Table.Combine(Grouped[最新行])
 in
