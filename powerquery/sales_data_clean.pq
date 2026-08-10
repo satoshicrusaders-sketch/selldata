@@ -782,6 +782,16 @@ let
         in
             if List.IsEmpty(matches) then stripped else matches{0}{1},
 
+    // メーカー①欄に、実際は取引先名や部位名など「メーカーではない値」が
+    // そのまま入力されていることがある(元データの入力ミス)。該当したら
+    // メーカーとして採用せず除外する(他のトークンがあればそちらだけ残す)
+    NonMakerValues = {
+        "メディカルアート株式会社",
+        "カップ側"
+    },
+    fnIsNonMakerValue = (v as text) as logical =>
+        List.AnyTrue(List.Transform(NonMakerValues, each Text.Upper(_) = Text.Upper(v))),
+
     // メーカー①は「+」(全角＋も含む)区切りで複数メーカーが併記されることがあるため、
     // トークンごとに略称を正式名称へ解決してから結合し直す。単独表記(トークン1つ)にも
     // そのまま使える
@@ -794,7 +804,8 @@ let
                 normalizedPlus = if collapsed = null then null else Text.Replace(collapsed, "＋", "+"),
                 tokens = if normalizedPlus = null then {} else Text.Split(normalizedPlus, "+"),
                 resolvedTokens = List.Transform(tokens, fnResolveMakerToken),
-                dedupedTokens = List.Distinct(resolvedTokens),
+                nonExcludedTokens = List.Select(resolvedTokens, each not fnIsNonMakerValue(_)),
+                dedupedTokens = List.Distinct(nonExcludedTokens),
                 rejoined = Text.Combine(dedupedTokens, "+")
             in
                 if rejoined = "" then null else rejoined,
