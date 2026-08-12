@@ -500,11 +500,22 @@ let
     // Text.Trimだけだと全角スペースが除去できず、それが原因で同じ病院が別名として
     // 重複することがあったため、取引先と同じfnCollapseWhitespaceを使う
     // (fnCollapseWhitespaceはこのクエリ内の後方で定義しているが、M言語は定義順に
-    // 依存しないためこの位置から参照して問題ない)
+    // 依存しないためこの位置から参照して問題ない)。
+    // さらに、「埼玉医科大学総合医療センター」と「埼玉医科大学総合医療センター病院」の
+    // ように、末尾の「病院」の有無だけで同じ病院が別名扱いされることがあったため、
+    // 名称一致の判定では末尾の「病院」を無視して比較する
+    fnStripHospitalSuffix = (v as nullable text) as nullable text =>
+        if v = null then
+            null
+        else if Text.EndsWith(v, "病院") then
+            Text.Trim(Text.Start(v, Text.Length(v) - 2))
+        else
+            v,
+
     WithTrimmedHospitalName = Table.AddColumn(
         WithHospitalCode,
         "病院名_マッチ用",
-        each fnCollapseWhitespace(Record.FieldOrDefault(_, "病院名", null)),
+        each fnStripHospitalSuffix(fnCollapseWhitespace(Record.FieldOrDefault(_, "病院名", null))),
         type nullable text
     ),
 
@@ -512,6 +523,20 @@ let
     // ①病院コード一致 → ②(コードで見つからない場合のみ)病院名一致 の優先順で
     // 住所・電話番号・URL・正式名称を解決して直接マージする
     HospitalMaster = 病院マスタ,
+
+    // 名称一致用に、マスタ側も同じ基準(末尾の「病院」を無視)で正規化した列を
+    // 用意する。これにより「名称_マッチ用」の重複が新たに生まれる可能性がある
+    // (「〇〇病院」と「〇〇」が別々にマスタに登録されている場合など)ため、
+    // 結合で行が増殖しないよう念のため1件に絞る
+    HospitalMasterForNameMatch = Table.Distinct(
+        Table.AddColumn(
+            HospitalMaster,
+            "名称_マッチ用",
+            each fnStripHospitalSuffix(Record.FieldOrDefault(_, "名称", null)),
+            type nullable text
+        ),
+        {"名称_マッチ用"}
+    ),
 
     MergedByCode = Table.NestedJoin(
         WithTrimmedHospitalName, {"病院コード"},
@@ -526,7 +551,7 @@ let
 
     MergedByName = Table.NestedJoin(
         ExpandedByCode, {"病院名_マッチ用"},
-        HospitalMaster, {"名称"},
+        HospitalMasterForNameMatch, {"名称_マッチ用"},
         "マスタ_名称一致", JoinKind.LeftOuter
     ),
     ExpandedByName = Table.ExpandTableColumn(
