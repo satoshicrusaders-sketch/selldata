@@ -810,7 +810,10 @@ let
 
     fnResolveMakerToken = (token as text) as text =>
         let
-            stripped = fnStripInstrumentSuffix(Text.Trim(token)),
+            // 「ジョイアップ+,ナカシマ」のような、区切りの「+」の後にカンマが
+            // 誤って入力されているケースがあるため、判定前に取り除く
+            noComma = Text.Trim(Text.Remove(token, {",", "、"})),
+            stripped = fnStripInstrumentSuffix(noComma),
             upperStripped = Text.Upper(stripped),
             matches = List.Select(MakerAbbrevMap, each Text.Upper(_{0}) = upperStripped)
         in
