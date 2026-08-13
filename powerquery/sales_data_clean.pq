@@ -745,14 +745,19 @@ let
     KanjiVariantMap = {
         {"髙", "高"}
     },
+    // Excelの日付起点(シリアル値0/1)が誤って文字列化されたもの。
+    // 担当者が未入力のセルが日付として扱われてしまった結果と思われるため、
+    // 人名ではなくこれらの値が入っている場合は空欄にする
+    InvalidStaffValues = {"1899/12/31", "1899/12/30", "1900/1/1"},
     fnNormalizeStaffName = (v as any) as nullable text =>
         if v = null then
             null
         else
             let
-                replaced = List.Accumulate(KanjiVariantMap, Text.From(v), (state, pair) => Text.Replace(state, pair{0}, pair{1}))
+                replaced = List.Accumulate(KanjiVariantMap, Text.From(v), (state, pair) => Text.Replace(state, pair{0}, pair{1})),
+                collapsed = fnCollapseWhitespace(replaced)
             in
-                fnCollapseWhitespace(replaced),
+                if collapsed <> null and List.Contains(InvalidStaffValues, collapsed) then null else collapsed,
 
     // 担当者名も全角/半角スペースの混在(例:「村野 博明」と「村野　博明」)や
     // 異体字(例:「髙村」と「高村」)で同一人物が別人扱いされ、グラフの凡例などで
