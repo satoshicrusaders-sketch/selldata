@@ -897,6 +897,30 @@ let
         else
             FinalWithStaff,
 
+    // 納入掛率(=定価に対する売上金額の掛け率)。生データの「価格1」「価格2」「掛率」
+    // 列を実データで検算したところ、「価格2」が製品マスタの「定価」と一致し、
+    // 「価格1」は定価とは別の基準額(売上金額=価格1×掛率が成立)であることが分かった。
+    // そのため既存の「掛率」列はそのまま定価に対する掛け率としては使えず、
+    // 定価(製品番号突き合わせ済み)と売上金額から明細行単位で計算し直す。
+    // なお仕入掛率(税抜仕入計ベース)は、税抜仕入計が症例単位の値であり明細行単位に
+    // 分解できないため、この列とは別に検討が必要(保留中)。
+    fnSafeDivide = (numerator as nullable number, denominator as nullable number) as nullable number =>
+        if numerator = null or denominator = null or denominator = 0 then
+            null
+        else
+            numerator / denominator,
+
+    FinalWithMarkupRate =
+        if List.Contains(Table.ColumnNames(FinalWithProductMaker), "定価") and List.Contains(Table.ColumnNames(FinalWithProductMaker), "売上金額") then
+            Table.AddColumn(
+                FinalWithProductMaker,
+                "納入掛率",
+                each fnSafeDivide(Record.FieldOrDefault(_, "売上金額", null), Record.FieldOrDefault(_, "定価", null)),
+                type nullable number
+            )
+        else
+            FinalWithProductMaker,
+
     // 47都道府県のリスト(住所の先頭との前方一致で判定する。「都」「道」「府」「県」の
     // 文字位置だけで機械的に切り出すと、市区町村名にたまたま同じ文字が含まれる場合に
     // 誤判定するおそれがあるため、正式な都道府県名との突き合わせにする)
@@ -922,14 +946,14 @@ let
                 if List.IsEmpty(matches) then null else matches{0},
 
     FinalWithPrefecture =
-        if List.Contains(Table.ColumnNames(FinalWithProductMaker), "住所") then
+        if List.Contains(Table.ColumnNames(FinalWithMarkupRate), "住所") then
             Table.AddColumn(
-                FinalWithProductMaker,
+                FinalWithMarkupRate,
                 "都道府県",
                 each fnExtractPrefecture(Record.FieldOrDefault(_, "住所", null)),
                 type nullable text
             )
         else
-            FinalWithProductMaker
+            FinalWithMarkupRate
 in
     FinalWithPrefecture
