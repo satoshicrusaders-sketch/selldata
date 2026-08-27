@@ -870,8 +870,8 @@ let
                 ),
                 ExpandedByProduct = Table.ExpandTableColumn(
                     MergedByProduct, "マスタ_製品一致",
-                    {"メーカー"},
-                    {"メーカー_マスタ"}
+                    {"メーカー", "定価"},
+                    {"メーカー_マスタ", "定価"}
                 ),
 
                 // ①製品マスタで製品番号が一致すればそのメーカー(正規化済み) →
