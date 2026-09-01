@@ -136,11 +136,30 @@ let
                                 )
                         ),
 
+                        // この期(ファイル)に明細単位の製品情報列(製品名1/2・製品番号)が
+                        // そもそも存在するかどうかを、行ではなくファイル単位で記録しておく。
+                        // Table.Combineで全期の列を結合すると、列が元々無かった期の行も
+                        // 単に値がnullになるだけで「列が無かった」ことが分からなくなり、
+                        // 後段のIsIncompletePendingRow(入力途中行の除外)が正常な明細行まで
+                        // 「製品名が空欄」と誤判定して丸ごと除外してしまう(2024.10等で実際に
+                        // 発生し、明細行の93%が消える重大なバグになっていた)
+                        hasProductInfoCols = List.AnyTrue(
+                            List.Transform(
+                                {"製品名1", "製品名2", "製品番号"},
+                                each List.Contains(Table.ColumnNames(noFooterTotal), _)
+                            )
+                        ),
+
                         withMeta = Table.AddColumn(
-                            Table.AddColumn(noFooterTotal, "年月", each yearMonth, type text),
-                            "ソースファイル",
-                            each fileName,
-                            type text
+                            Table.AddColumn(
+                                Table.AddColumn(noFooterTotal, "年月", each yearMonth, type text),
+                                "ソースファイル",
+                                each fileName,
+                                type text
+                            ),
+                            "__製品列あり",
+                            each hasProductInfoCols,
+                            type logical
                         )
                     in
                         withMeta
@@ -443,14 +462,21 @@ let
     // 「処理中」の行が残っている(製品名が空欄かつ税抜売上計も0/null)。
     // 売上には計上されていないので分析上はノイズになるため除外する。
     fnIsBlankOrNull = (v as any) as logical => v = null or v = "",
+    // 製品名1/2列がそもそも存在しない期(例:2024.10)の行は、この判定の対象外にする
+    // (存在しない列は結合後どのみnullになり、製品名が入力された正常な明細行と
+    //  区別がつかなくなるため。__製品列あり はfnProcessSheetDataでファイル単位に付与済み)
     IsIncompletePendingRow = (r as record) as logical =>
-        fnIsBlankOrNull(Record.FieldOrDefault(r, "製品名1", null))
+        Record.FieldOrDefault(r, "__製品列あり", false)
+        and fnIsBlankOrNull(Record.FieldOrDefault(r, "製品名1", null))
         and fnIsBlankOrNull(Record.FieldOrDefault(r, "製品名2", null))
         and (
             Record.FieldOrDefault(r, "税抜売上計", null) = null
             or Record.FieldOrDefault(r, "税抜売上計", null) = 0
         ),
-    ExcludedIncompleteRows = Table.SelectRows(WithUnifiedDate, each not IsIncompletePendingRow(_)),
+    ExcludedIncompleteRows = Table.RemoveColumns(
+        Table.SelectRows(WithUnifiedDate, each not IsIncompletePendingRow(_)),
+        List.Intersect({Table.ColumnNames(WithUnifiedDate), {"__製品列あり"}})
+    ),
 
     // 病院マスタの「コード」は、伝票番号1の下3桁と対応している。
     // 伝票番号1列が存在しない期間の行は病院コードもnullになる。
